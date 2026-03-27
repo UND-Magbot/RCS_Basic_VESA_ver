@@ -214,15 +214,21 @@ def execute_scheduled_task(task_id: int):
         route = db.query(TaskRoute).filter(TaskRoute.id == task.route_id).first()
         if not route:
             logger.error(f"[scheduler] Route {task.route_id} not found for task {task_id}")
+            from app.crud.activity_log import log_activity
+            log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 실패: 경로를 찾을 수 없습니다", source="scheduler")
             return
 
         robot = db.query(Robot).filter(Robot.id == task.robot_id).first()
         if not robot or not robot.ip_address:
             logger.error(f"[scheduler] Robot not found for route {route.id}")
+            from app.crud.activity_log import log_activity
+            log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 실패: 로봇을 찾을 수 없습니다", source="scheduler")
             return
 
         if robot.id in _running_robots:
             logger.warning(f"[scheduler] Robot {robot.id} busy, skipping task {task_id}")
+            from app.crud.activity_log import log_activity
+            log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 건너뜀: 로봇이 작업 중입니다", source="scheduler")
             return
         _running_robots.add(robot.id)
 
@@ -255,6 +261,8 @@ def execute_scheduled_task(task_id: int):
 
         if len(wp_list) < 2:
             logger.error(f"[scheduler] Not enough waypoints for route {route.id}")
+            from app.crud.activity_log import log_activity
+            log_activity("robot", "task_error", f"스케줄 '{task_name}' 실행 실패: 경로에 웨이포인트가 부족합니다", source="scheduler")
             _running_robots.discard(robot.id)
             return
 

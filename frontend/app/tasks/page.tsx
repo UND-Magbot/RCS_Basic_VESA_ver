@@ -453,7 +453,7 @@ export default function TasksPage() {
                                 <td>{r.waypoints.map((w) => `${w.poi_name}(${w.waypoint_type === "pickup" ? "픽업" : w.waypoint_type === "dropoff" ? "드롭오프" : "대기"})`).join(" → ")}</td>
                                 <td className="tasks-table__actions">
                                   <button className="tasks-btn tasks-btn--edit" onClick={() => startRouteEdit(r)}>편집</button>
-                                  <button className="tasks-btn tasks-btn--del" onClick={() => showConfirm("경로를 삭제하시겠습니까?", () => deleteRoute(r.id).then(() => getRoutes().then((d) => setRoutes(d.items))))}>삭제</button>
+                                  <button className="tasks-btn tasks-btn--del" onClick={() => showConfirm("경로를 삭제하시겠습니까?", async () => { await deleteRoute(r.id); const d = await getRoutes(); setRoutes(d.items); })}>삭제</button>
                                 </td>
                               </tr>
                             ))
@@ -667,7 +667,7 @@ export default function TasksPage() {
                   {alertModal.onConfirm ? (
                     <>
                       <button className="tasks-btn" onClick={() => setAlertModal(null)}>취소</button>
-                      <button className="tasks-btn tasks-btn--primary" onClick={() => { alertModal.onConfirm!(); setAlertModal(null); }}>확인</button>
+                      <button className="tasks-btn tasks-btn--primary" onClick={async () => { setAlertModal(null); await alertModal.onConfirm!(); }}>확인</button>
                     </>
                   ) : (
                     <button className="tasks-btn tasks-btn--primary" onClick={() => setAlertModal(null)}>확인</button>

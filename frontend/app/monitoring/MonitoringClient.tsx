@@ -901,6 +901,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
         : robot.status?.battery_level ?? null,
       enable: robot.is_active,
       nickname: live?.NICKNAME ?? null,
+      ip: robot.ip_address ?? null,
       axbotVersion: live?.AXBOT_VERSION ?? null,
       platform: live?.PLATFORM ?? null,
       busiName: null,

@@ -7,13 +7,11 @@ services:
       - "8002:8002"
     environment:
       - TZ=Asia/Seoul
-      - DB_HOST=host.docker.internal
+      - DB_HOST=192.168.0.21
       - DB_PORT=${DB_PORT:-3306}
-      - DB_USER=${DB_USER:-administrator}
-      - DB_PASSWORD=${DB_PASSWORD:-qwer!@34}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-1234}
       - DB_NAME=${DB_NAME:-rcs_basic_db}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       - ./BackEnd/static:/app/static
       - /home/administrator:/home/administrator

@@ -19,7 +19,7 @@ def api_get_logs(
     date_to: datetime | None = Query(None),
     db: Session = Depends(get_db),
 ):
-    """activity_logs + system_logs 통합 조회 (기본: 당일 KST)"""
+    """activity_logs 조회 (기본: 당일 KST)"""
     items, total = get_unified_logs(
         db,
         skip=skip,

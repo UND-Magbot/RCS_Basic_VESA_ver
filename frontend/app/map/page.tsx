@@ -27,7 +27,6 @@ import type {
   MapMeta,
 } from "@/lib/types/map";
 import { apiFetch } from "@/lib/api";
-import { LoadingScreen } from "../components/ui/LoadingScreen";
 import { ConfirmModal } from "../components/ui/robots/ConfirmModal";
 import { useAlert } from "@/lib/context/AlertContext";
 import "./map.css";
@@ -79,8 +78,6 @@ function syncNextId(ids: string[]) {
 export default function MapPage() {
   const [navCollapsed, setNavCollapsed] = useState(true);
   const [currentDateTime, setCurrentDateTime] = useState(formatDateTime);
-  const [isLoading, setIsLoading] = useState(true);
-
   // Map state
   const [pois, setPois] = useState<POI[]>([]);
   const [lines, setLines] = useState<PathLine[]>([]);
@@ -151,6 +148,8 @@ export default function MapPage() {
   // Robot pose (real-time)
   const [robotPose, setRobotPose] = useState<RobotPose>(null);
   const poseWsRef = useRef<WebSocket | null>(null);
+  const vwPointsRef = useRef<{ x: number; y: number }[]>([]);
+  const [vwTempPoints, setVwTempPoints] = useState<{ x: number; y: number }[]>([]);
   const [mapImageSize, setMapImageSize] = useState<{ w: number; h: number } | null>(null);
 
   const { showAlert, showInfo } = useAlert();
@@ -165,11 +164,6 @@ export default function MapPage() {
   useEffect(() => {
     const timer = setInterval(() => setCurrentDateTime(formatDateTime()), 1000);
     return () => clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
-    const t = setTimeout(() => setIsLoading(false), 3000);
-    return () => clearTimeout(t);
   }, []);
 
   // Esc 키 → select 모드로 복귀
@@ -188,14 +182,13 @@ export default function MapPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // 사업장 목록 로드 (초기 로드 시 "구미본사" 자동 선택)
+  // 사업장 목록 로드 (첫 번째 사업장 자동 선택)
   useEffect(() => {
     apiFetch<{ total: number; items: BusinessItem[] }>("/api/map/businesses")
       .then((data) => {
         setBusinesses(data.items);
-        if (!selectedBusiness) {
-          const defaultBiz = data.items.find((b) => b.name === "구미 본사");
-          if (defaultBiz) setSelectedBusiness(String(defaultBiz.business_id));
+        if (!selectedBusiness && data.items.length > 0) {
+          setSelectedBusiness(String(data.items[0].business_id));
         }
       })
       .catch((err) => {
@@ -220,16 +213,11 @@ export default function MapPage() {
     )
       .then((data) => {
         setAreas(data.items);
-        // 초기 로드 시 "area-B001" 자동 선택
-        if (initialLoadRef.current) {
-          const defaultArea = data.items.find((a) => a.name === "area-B001");
-          if (defaultArea) {
-            setSelectedArea(String(defaultArea.area_id));
-            initialLoadRef.current = false;
-            return;
-          }
+        if (data.items.length > 0) {
+          setSelectedArea(String(data.items[data.items.length - 1].area_id));
+        } else {
+          setSelectedArea("");
         }
-        setSelectedArea("");
       })
       .catch((err) => {
         console.error("[영역 목록 로드 실패]", err);
@@ -255,9 +243,9 @@ export default function MapPage() {
     )
       .then((data) => {
         setAreaMaps(data.items);
-        // 첫 번째 맵의 이미지를 자동으로 로드
-        if (data.items.length > 0 && data.items[0].image_url) {
-          const map = data.items[0];
+        // 최신 맵의 이미지를 자동으로 로드
+        if (data.items.length > 0 && data.items[data.items.length - 1].image_url) {
+          const map = data.items[data.items.length - 1];
           setSelectedMapId(map.id);
           setSelectedMappingId(map.mapping_id);
           const imgUrl = map.image_url!;
@@ -272,7 +260,7 @@ export default function MapPage() {
             grid_resolution: map.grid_resolution,
           });
           // 저장된 POI·라인 로드
-          apiFetch<{ pois: any[]; lines: any[] }>(
+          apiFetch<{ pois: any[]; lines: any[]; polygons?: any[] }>(
             `/api/map/maps/${map.id}/elements`
           )
             .then((elems) => {
@@ -297,11 +285,19 @@ export default function MapPage() {
                 lineType: l.lineType,
                 controlPoints: l.controlPoints ?? undefined,
               }));
+              const loadedPolygons = (elems.polygons || []).map((pg: any) => ({
+                id: pg.id,
+                name: pg.name,
+                shapeType: pg.shapeType ?? "polygon",
+                points: pg.points ?? [],
+              }));
               setPois(loadedPois);
               setLines(loadedLines);
+              setPolygons(loadedPolygons);
               syncNextId([
                 ...loadedPois.map((p: any) => p.id),
                 ...loadedLines.map((l: any) => l.id),
+                ...loadedPolygons.map((pg: any) => pg.id),
               ]);
             })
             .catch((err) => {
@@ -431,6 +427,28 @@ export default function MapPage() {
         setEditingPOI(newPOI);
         setSelectedPOI(newPOI.id);
         setPendingPOIId(newPOI.id);
+      } else if (activeTool === "jackPoint") {
+        const hitPOI = pois.find(
+          (p) => Math.abs(p.x - x) < 15 / zoom && Math.abs(p.y - y) < 15 / zoom
+        );
+        if (hitPOI) {
+          setSelectedPOI(hitPOI.id);
+          setEditingPOI(hitPOI);
+          return;
+        }
+        pushHistory();
+        const jackCount = pois.filter((p) => p.type === "jack").length;
+        const newPOI: POI = {
+          id: generateId("poi"),
+          x,
+          y,
+          name: `J${jackCount + 1}`,
+          type: "jack",
+        };
+        setPois((prev) => [...prev, newPOI]);
+        setEditingPOI(newPOI);
+        setSelectedPOI(newPOI.id);
+        setPendingPOIId(newPOI.id);
       } else if ((activeTool === "line" || activeTool === "curveLine") && lineStartPOI) {
         // 기존 POI 클릭 시 그대로 연결, 빈 캔버스 클릭 시 새 POI 생성 후 연결
         const hitPOI = pois.find(
@@ -471,6 +489,7 @@ export default function MapPage() {
           });
         }
       } else if (activeTool === "firewall") {
+        // 방화벽: 기존 두 점 클릭 → 라인 방식
         if (!lineStartPOI) {
           pushHistory();
           const fwCount = pois.filter((p) => p.type === "firewall").length;
@@ -501,6 +520,24 @@ export default function MapPage() {
           setPois((prev) => [...prev, newPOI]);
           setLines((prev) => [...prev, newLine]);
           setLineStartPOI(null);
+        }
+      } else if (activeTool === "virtualwall") {
+        // 가상벽: 4점 클릭으로 사각형 생성
+        vwPointsRef.current.push({ x, y });
+        if (vwPointsRef.current.length >= 4) {
+          pushHistory();
+          const vwCount = polygons.filter((p) => p.shapeType === "firewall").length;
+          const newPolygon: PolygonShape = {
+            id: generateId("polygon"),
+            points: [...vwPointsRef.current],
+            name: `VW${vwCount + 1}`,
+            shapeType: "firewall",
+          };
+          setPolygons((prev) => [...prev, newPolygon]);
+          vwPointsRef.current = [];
+          setVwTempPoints([]);
+        } else {
+          setVwTempPoints([...vwPointsRef.current]);
         }
       } else if (activeTool === "polygon") {
         setPolygonPoints((prev) => [...prev, { x, y }]);
@@ -675,6 +712,12 @@ export default function MapPage() {
     setLineStartPOI(null);
     setLineDirectionPopup(null);
 
+    // 가상벽 도구에서 벗어나면 임시 점 초기화
+    if (tool !== "virtualwall") {
+      vwPointsRef.current = [];
+      setVwTempPoints([]);
+    }
+
     // If switching away from polygon, finalize current polygon
     if (tool !== "polygon") {
       setPolygonPoints((prev) => {
@@ -690,35 +733,42 @@ export default function MapPage() {
       });
     }
 
-    // currentPos / chargingPile: immediately create POI at robot position
-    if ((tool === "currentPos" || tool === "chargingPile") && robotPose && mapMeta && mapMeta.grid_resolution > 0 && mapImageSize) {
+    // currentPos / currentPosJack / chargingPile: immediately create POI at robot position
+    if ((tool === "currentPos" || tool === "currentPosJack" || tool === "chargingPile") && robotPose && mapMeta && mapMeta.grid_resolution > 0 && mapImageSize) {
       const isCharging = tool === "chargingPile";
+      const isJack = tool === "currentPosJack";
 
-      // 충전소: 로봇 도킹 위치 → 충전소 위치로 변환 (백엔드가 +0.9m, +180° 역산하므로)
-      // 일반 POI: 로봇 현재 위치 그대로 사용
-      const DOCKING_OFFSET = 0.9;
-      const worldX = isCharging
-        ? robotPose.pos[0] + DOCKING_OFFSET * Math.cos(robotPose.ori)
-        : robotPose.pos[0];
-      const worldY = isCharging
-        ? robotPose.pos[1] + DOCKING_OFFSET * Math.sin(robotPose.ori)
-        : robotPose.pos[1];
-      const angle = isCharging
-        ? robotPose.ori - Math.PI
-        : robotPose.ori;
+      // 충전소: 로봇 도킹 위치 → 충전소 위치로 변환
+      // 일반/잭킹 POI: 로봇 현재 위치 그대로 사용
+      const worldX = robotPose.pos[0];
+      const worldY = robotPose.pos[1];
+      const angle = robotPose.ori;
 
-      // 월드 좌표 → SVG 좌표 변환 (MapCanvas 로봇 표시와 동일 공식)
+      // 월드 좌표 → SVG 좌표 변환
       const ipx = (worldX - mapMeta.grid_origin_x) / mapMeta.grid_resolution;
       const ipy = mapImageSize.h - (worldY - mapMeta.grid_origin_y) / mapMeta.grid_resolution;
       const svgX = ipx - mapImageSize.w / 2;
       const svgY = ipy - mapImageSize.h / 2;
 
+      let poiName: string;
+      let poiType: POI["type"];
+      if (isCharging) {
+        poiName = `CHARGE${pois.filter((p) => p.type === "charging").length + 1}`;
+        poiType = "charging";
+      } else if (isJack) {
+        poiName = `J${pois.filter((p) => p.type === "jack").length + 1}`;
+        poiType = "jack";
+      } else {
+        poiName = `CURPOS${pois.length + 1}`;
+        poiType = "waypoint";
+      }
+
       const newPOI: POI = {
         id: generateId("poi"),
         x: svgX,
         y: svgY,
-        name: isCharging ? `CHARGE${pois.length + 1}` : `CURPOS${pois.length + 1}`,
-        type: isCharging ? "charging" : "waypoint",
+        name: poiName,
+        type: poiType,
         angle,
       };
       setPois((prev) => [...prev, newPOI]);
@@ -825,11 +875,43 @@ export default function MapPage() {
     apiFetch(`/api/map/maps/${selectedMapId}/elements`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pois: poisWithWorld, lines: linesWithWorld }),
+      body: JSON.stringify({
+        pois: poisWithWorld,
+        lines: linesWithWorld,
+        polygons: polygons.map((pg) => {
+          const pointsWithWorld = pg.points.map((pt) => {
+            const w = svgToWorld(pt.x, pt.y);
+            return { x: pt.x, y: pt.y, worldX: w?.worldX ?? null, worldY: w?.worldY ?? null };
+          });
+          return { ...pg, points: pointsWithWorld };
+        }),
+      }),
     })
-      .then(() => showAlert({ title: "저장 완료", message: "저장되었습니다." }))
-      .catch((err) => showAlert({ title: "알림", message: "맵 데이터 저장에 실패했습니다.", errorCode: "MAP-006", errorType: "map", source: "맵 관리 > 맵 저장", description: "MapPage — 맵 저장 실패" }));
-  }, [selectedMapId, pois, lines, svgToWorld]);
+      .then(() => {
+        showAlert({ title: "저장 완료", message: "저장되었습니다." });
+        // 저장 후 맵 목록 갱신하여 최신 이미지 반영
+        if (selectedArea) {
+          apiFetch<{ total: number; items: MapItem[] }>(`/api/map/areas/${selectedArea}/maps`)
+            .then((data) => {
+              setAreaMaps(data.items);
+              if (data.items.length > 0) {
+                const latest = data.items[data.items.length - 1];
+                setSelectedMapId(latest.id);
+                setSelectedMappingId(latest.mapping_id);
+                if (latest.image_url) {
+                  setMapImageUrl(
+                    latest.image_url.startsWith("/static/")
+                      ? `${process.env.NEXT_PUBLIC_API_URL}${latest.image_url}`
+                      : `${process.env.NEXT_PUBLIC_API_URL}/api/map/proxy-image?url=${encodeURIComponent(latest.image_url)}`
+                  );
+                }
+              }
+            })
+            .catch(() => {});
+        }
+      })
+      .catch(() => showAlert({ title: "알림", message: "맵 데이터 저장에 실패했습니다.", errorCode: "MAP-006", errorType: "map", source: "맵 관리 > 맵 저장", description: "MapPage — 맵 저장 실패" }));
+  }, [selectedMapId, pois, lines, polygons, svgToWorld]);
   const handleSync = () => {
     if (!selectedMappingId) {
       showInfo("안내", "동기화할 맵을 먼저 선택해 주세요.");
@@ -867,7 +949,13 @@ export default function MapPage() {
     }
   };
 
-  const handleStartMapping = () => setMappingSetupOpen(true);
+  const handleStartMapping = () => {
+    if (!connectedRobot) {
+      showInfo("안내", "먼저 로봇을 연결해 주세요.");
+      return;
+    }
+    setMappingSetupOpen(true);
+  };
   const handleMappingSetupConfirm = (businessId: number, areaId: string, areaName: string) => {
     setMappingBusinessId(businessId);
     setMappingAreaId(areaId);
@@ -875,35 +963,75 @@ export default function MapPage() {
     setMappingSetupOpen(false);
     setMappingModalOpen(true);
   };
-  const handleMappingComplete = useCallback(() => {
-    // 사업장 목록 갱신
-    apiFetch<{ total: number; items: BusinessItem[] }>("/api/map/businesses")
-      .then((data) => setBusinesses(data.items))
-      .catch((err) => {
-        console.error("[맵핑 완료 후 사업장 목록 갱신 실패]", err);
-        showAlert({ title: "알림", message: "맵핑 완료 후 사업장 목록 갱신에 실패했습니다.", errorCode: "MAP-011", errorType: "map", source: "맵 관리 > 맵핑 완료", description: "MapPage — 매핑 완료 후 사업장 갱신 실패" });
-      });
-    // 현재 선택된 사업장의 영역 목록 갱신
-    if (selectedBusiness) {
-      apiFetch<{ total: number; items: AreaItem[] }>(
-        `/api/map/businesses/${selectedBusiness}/areas`
-      )
-        .then((data) => setAreas(data.items))
-        .catch((err) => {
-          console.error("[맵핑 완료 후 영역 목록 갱신 실패]", err);
-          showAlert({ title: "알림", message: "맵핑 완료 후 영역 목록 갱신에 실패했습니다.", errorCode: "MAP-012", errorType: "map", source: "맵 관리 > 맵핑 완료", description: "MapPage — 매핑 완료 후 영역 갱신 실패" });
-        });
-    }
-    // 현재 선택된 영역의 맵 목록 갱신
-    if (selectedArea) {
-      apiFetch<{ total: number; items: MapItem[] }>(
-        `/api/map/areas/${selectedArea}/maps`
-      )
-        .then((data) => setAreaMaps(data.items))
-        .catch((err) => {
-          console.error("[맵핑 완료 후 맵 목록 갱신 실패]", err);
-          showAlert({ title: "알림", message: "맵핑 완료 후 맵 목록 갱신에 실패했습니다.", errorCode: "MAP-013", errorType: "map", source: "맵 관리 > 맵핑 완료", description: "MapPage — 매핑 완료 후 맵 갱신 실패" });
-        });
+  const handleMappingComplete = useCallback(async () => {
+    try {
+      // 사업장 목록 갱신
+      const bizData = await apiFetch<{ total: number; items: BusinessItem[] }>("/api/map/businesses");
+      setBusinesses(bizData.items);
+
+      // 영역 목록 갱신
+      if (selectedBusiness) {
+        const areaData = await apiFetch<{ total: number; items: AreaItem[] }>(
+          `/api/map/businesses/${selectedBusiness}/areas`
+        );
+        setAreas(areaData.items);
+
+        // 첫 번째 영역 자동 선택 (영역이 없었다면)
+        if (!selectedArea && areaData.items.length > 0) {
+          setSelectedArea(String(areaData.items[0].area_id));
+          return; // selectedArea 변경 시 useEffect가 맵 로드 처리
+        }
+      }
+
+      // 현재 영역의 최신 맵 로드
+      if (selectedArea) {
+        const mapData = await apiFetch<{ total: number; items: MapItem[] }>(
+          `/api/map/areas/${selectedArea}/maps`
+        );
+        setAreaMaps(mapData.items);
+
+        if (mapData.items.length > 0) {
+          const map = mapData.items[0];
+          setSelectedMapId(map.id);
+          setSelectedMappingId(map.mapping_id);
+          const imgUrl = map.image_url;
+          if (imgUrl) {
+            setMapImageUrl(
+              imgUrl.startsWith("/static/")
+                ? `${process.env.NEXT_PUBLIC_API_URL}${imgUrl}`
+                : `${process.env.NEXT_PUBLIC_API_URL}/api/map/proxy-image?url=${encodeURIComponent(imgUrl)}`
+            );
+          }
+          setMapMeta({
+            grid_origin_x: map.grid_origin_x,
+            grid_origin_y: map.grid_origin_y,
+            grid_resolution: map.grid_resolution,
+          });
+
+          // POI·라인 로드
+          const elems = await apiFetch<{ pois: any[]; lines: any[]; polygons?: any[] }>(
+            `/api/map/maps/${map.id}/elements`
+          );
+          setPois(elems.pois.map((p: any) => ({
+            id: p.id, name: p.name, x: p.x, y: p.y, type: p.poi_type || "waypoint",
+            phoneNumber: p.phone_number || "", angle: p.angle ?? null,
+            loadType: p.load_type || "normal", robotSns: p.robot_sns ? JSON.parse(p.robot_sns) : [],
+            dockingRadius: p.docking_radius ?? null,
+          })));
+          setLines(elems.lines?.map((l: any) => ({
+            id: l.id, fromId: l.from_poi_id, toId: l.to_poi_id,
+            direction: l.direction || "forward", lineType: l.line_type || "straight",
+            controlPoints: l.control_points ? JSON.parse(l.control_points) : [],
+            areaName: l.area_name || "",
+          })) || []);
+          setPolygons(elems.polygons?.map((pg: any) => ({
+            id: pg.id, name: pg.name || "", shapeType: pg.shape_type || "polygon",
+            points: pg.points_json ? JSON.parse(pg.points_json) : [],
+          })) || []);
+        }
+      }
+    } catch (err) {
+      console.error("[맵핑 완료 후 갱신 실패]", err);
     }
   }, [selectedBusiness, selectedArea]);
   const handleRemoteImage = () => console.log("Remote Image");
@@ -911,7 +1039,6 @@ export default function MapPage() {
 
   return (
     <>
-      {isLoading && <LoadingScreen pageName="맵 관리" />}
       <div className="app-shell">
       <TopBar
         dateTime={currentDateTime}
@@ -942,6 +1069,10 @@ export default function MapPage() {
               onRelocalize={handleRelocalize}
               onDelete={handleDelete}
               syncDisabled={!selectedMapId || !selectedMappingId}
+              onBusinessCreated={(id, name) => {
+                setBusinesses((prev) => [...prev, { business_id: id, name }]);
+                setSelectedBusiness(String(id));
+              }}
             />
 
             {/* Map Canvas Area */}
@@ -950,6 +1081,7 @@ export default function MapPage() {
                 pois={pois}
                 lines={lines}
                 polygons={polygons}
+                vwTempPoints={vwTempPoints}
                 activeTool={activeTool}
                 selectedPOI={selectedPOI}
                 lineStartPOI={lineStartPOI}
@@ -975,6 +1107,7 @@ export default function MapPage() {
                 isFullscreen={isFullscreen}
                 onChargingPile={() => handleToolChange("chargingPile")}
                 onCurrentPos={() => handleToolChange("currentPos")}
+                onCurrentPosJack={() => handleToolChange("currentPosJack")}
                 onFirewall={() => handleToolChange("firewall")}
               />
 

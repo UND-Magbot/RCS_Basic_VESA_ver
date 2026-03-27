@@ -5,7 +5,7 @@ import { useAlert } from "@/lib/context/AlertContext";
 import { verifyPassword, changePassword } from "@/lib/api/settings";
 import "./PasswordChangeTab.css";
 
-const PW_REGEX = /^(?=.*[a-zA-Z])(?=.*\d)(?=.*[^a-zA-Z0-9\s]).{6,}$/;
+const PW_REGEX = /^\d{4}$/;
 
 export function PasswordChangeTab() {
   const { showInfo, alertModal } = useAlert();
@@ -33,7 +33,7 @@ export function PasswordChangeTab() {
         }
 
         if (!PW_REGEX.test(newPw)) {
-          showInfo("알림", "비밀번호 규칙에 맞게 설정해주세요.\n(영문 + 숫자 + 특수문자, 6자 이상)");
+          showInfo("알림", "비밀번호는 4자리 숫자로 설정해주세요.");
           return;
         }
 
@@ -78,7 +78,9 @@ export function PasswordChangeTab() {
                 id="newPw"
                 className="pw-tab__input"
                 type="password"
-                placeholder="영문 + 숫자 + 특수문자, 6자 이상"
+                placeholder="4자리 숫자"
+                maxLength={4}
+                inputMode="numeric"
                 value={newPw}
                 onChange={(e) => setNewPw(e.target.value)}
                 autoComplete="off"

@@ -8,7 +8,7 @@ import { RobotTable } from "../components/ui/robots/RobotTable";
 import { RobotDeviceInfo } from "../components/ui/RobotDeviceInfo";
 import { ConfirmModal } from "../components/ui/robots/ConfirmModal";
 import type { RobotFilterState, RobotDevice } from "@/lib/types/robots";
-import { LoadingScreen } from "../components/ui/LoadingScreen";
+
 import "./robots.css";
 
 function formatDateTime() {
@@ -66,21 +66,19 @@ export default function RobotsPage() {
   const [appliedFilters, setAppliedFilters] = useState<RobotFilterState>(defaultFilters);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null);
   const [togglingDeviceId, setTogglingDeviceId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
-  const [isSyncing, setIsSyncing] = useState(false);
+  const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const [registerIp, setRegisterIp] = useState("");
+  const [isRegistering, setIsRegistering] = useState(false);
   const [confirmModal, setConfirmModal] = useState<{
     deviceId: string;
   } | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const PAGE_SIZE = 10;
   const PAGE_GROUP = 5;
-
-  // 로봇 데이터 수신 완료 시 로딩 종료
-  useEffect(() => {
-    if (devices.length > 0) setIsLoading(false);
-  }, [devices]);
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentDateTime(formatDateTime()), 1000);
@@ -109,26 +107,27 @@ export default function RobotsPage() {
     []
   );
 
-  // 초기 로드 + 10초 간격 실시간 폴링
-  useEffect(() => {
-    const fetchRobots = async () => {
-      try {
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/live`, {
-          cache: "no-store",
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const payload = await res.json();
-        setDevices(mapLivePayload(payload));
-        setErrorMessage(null);
-      } catch (e) {
-        setErrorMessage(`로봇 목록 조회 실패: ${String(e)}`);
-      }
-    };
+  const fetchRobots = useCallback(async () => {
+    try {
+      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/live`, {
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      setDevices(mapLivePayload(payload));
+      setErrorMessage(null);
+      setIsLoading(false);
+    } catch (e) {
+      setErrorMessage(`로봇 목록 조회 실패: ${String(e)}`);
+      setIsLoading(false);
+    }
+  }, [mapLivePayload]);
 
+  useEffect(() => {
     fetchRobots();
     const interval = setInterval(fetchRobots, 10000);
     return () => clearInterval(interval);
-  }, [mapLivePayload]);
+  }, [fetchRobots]);
 
   const models = useMemo(() => getDistinctModels(devices), [devices]);
 
@@ -214,23 +213,28 @@ export default function RobotsPage() {
     setAppliedFilters({ ...filters });
   }, [filters]);
 
-  const handleSyncLive = useCallback(async () => {
-    setIsSyncing(true);
-    setSyncMessage(null);
+  const handleRegisterByIp = useCallback(async () => {
+    if (!registerIp.trim()) return;
+    setIsRegistering(true);
     setErrorMessage(null);
+    setSyncMessage(null);
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/sync-live`, {
-        method: "POST",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/api/robots/register-by-ip?ip=${encodeURIComponent(registerIp.trim())}`,
+        { method: "POST" }
+      );
       const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
       setSyncMessage(data.message);
+      setShowRegisterModal(false);
+      setRegisterIp("");
+      fetchRobots();
     } catch (e) {
-      setErrorMessage(`로봇 정보 업로드 실패: ${String(e)}`);
+      setErrorMessage(`로봇 등록 실패: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setIsSyncing(false);
+      setIsRegistering(false);
     }
-  }, []);
+  }, [registerIp]);
 
   const selectedDevice = selectedDeviceId
     ? devices.find((d) => d.id === selectedDeviceId) ?? null
@@ -238,7 +242,7 @@ export default function RobotsPage() {
 
   return (
     <>
-      {isLoading && <LoadingScreen pageName="로봇 관리" />}
+
       <div className="app-shell">
       <TopBar
         dateTime={currentDateTime}
@@ -258,12 +262,48 @@ export default function RobotsPage() {
               <h1 className="robots-page__title">로봇 관리</h1>
               <button
                 className="robots-page__sync-btn"
-                onClick={handleSyncLive}
-                disabled={isSyncing}
+                onClick={() => setShowRegisterModal(true)}
               >
-                {isSyncing ? "업로드 중..." : "로봇 정보 업로드"}
+                로봇 등록
               </button>
             </header>
+
+            {showRegisterModal && (
+              <div style={{
+                padding: "16px",
+                background: "var(--bg-surface-2)",
+                border: "1px solid var(--border-strong)",
+                borderRadius: "var(--radius-card)",
+                marginBottom: "8px",
+                display: "flex",
+                gap: "8px",
+                alignItems: "center",
+              }}>
+                <input
+                  className="input"
+                  type="text"
+                  placeholder="로봇 IP 주소 (예: 192.168.0.34)"
+                  value={registerIp}
+                  onChange={(e) => setRegisterIp(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleRegisterByIp()}
+                  style={{ flex: 1 }}
+                  disabled={isRegistering}
+                />
+                <button
+                  className="btn btn--primary"
+                  onClick={handleRegisterByIp}
+                  disabled={!registerIp.trim() || isRegistering}
+                >
+                  {isRegistering ? "등록 중..." : "등록"}
+                </button>
+                <button
+                  className="btn btn--outline"
+                  onClick={() => { setShowRegisterModal(false); setRegisterIp(""); }}
+                >
+                  취소
+                </button>
+              </div>
+            )}
 
             {syncMessage && (
               <div
@@ -303,12 +343,18 @@ export default function RobotsPage() {
               </div>
             )}
 
-            <RobotTable
-              devices={pagedDevices}
-              onEnableToggle={handleEnableToggle}
-              onInfoClick={setSelectedDeviceId}
-              togglingDeviceId={togglingDeviceId}
-            />
+            {isLoading ? (
+              <div className="robots-loading">
+                <div className="spinner" />
+              </div>
+            ) : (
+              <RobotTable
+                devices={pagedDevices}
+                onEnableToggle={handleEnableToggle}
+                onInfoClick={setSelectedDeviceId}
+                togglingDeviceId={togglingDeviceId}
+              />
+            )}
 
             <div className="pagination">
               <button

@@ -1,6 +1,6 @@
-export type MapTool = "select" | "point" | "line" | "curveLine" | "polygon" | "del" | "chargingPile" | "currentPos" | "firewall";
+export type MapTool = "select" | "point" | "jackPoint" | "line" | "curveLine" | "polygon" | "del" | "chargingPile" | "currentPos" | "currentPosJack" | "firewall" | "virtualwall";
 
-export type POIType = "waypoint" | "standby" | "charging" | "firewall";
+export type POIType = "waypoint" | "standby" | "charging" | "firewall" | "jack";
 
 export type LoadType = "normal" | "heavy";
 
@@ -33,6 +33,7 @@ export type PolygonShape = {
   id: string;
   points: { x: number; y: number }[];
   name: string;
+  shapeType?: "polygon" | "firewall";
 };
 
 export type ConnectedRobot = {
@@ -72,6 +73,7 @@ export type MapCanvasProps = {
   onZoomChange: (zoom: number) => void;
   onOffsetChange: (offset: { x: number; y: number }) => void;
   onImageLoad?: (w: number, h: number) => void;
+  vwTempPoints?: { x: number; y: number }[];
 };
 
 export type MapToolbarTopProps = {
@@ -80,6 +82,7 @@ export type MapToolbarTopProps = {
   isFullscreen: boolean;
   onChargingPile: () => void;
   onCurrentPos: () => void;
+  onCurrentPosJack: () => void;
   onFirewall: () => void;
 };
 

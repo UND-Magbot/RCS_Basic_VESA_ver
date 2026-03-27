@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+import { apiPost } from "@/lib/api";
 import type { ConnectedRobot } from "@/lib/types/map";
 
 type BusinessItem = {
@@ -26,6 +28,7 @@ type MapTopBarProps = {
   onRelocalize: () => void;
   onDelete: () => void;
   syncDisabled?: boolean;
+  onBusinessCreated?: (id: number, name: string) => void;
 };
 
 export function MapTopBar({
@@ -42,25 +45,64 @@ export function MapTopBar({
   onRelocalize,
   onDelete,
   syncDisabled = true,
+  onBusinessCreated,
 }: MapTopBarProps) {
+  const [newBusinessName, setNewBusinessName] = useState("");
+  const [showBusinessInput, setShowBusinessInput] = useState(false);
+  const handleBusinessSelect = (value: string) => {
+    if (value === "__add__") {
+      setShowBusinessInput(true);
+      return;
+    }
+    onBusinessChange(value);
+  };
+
+  const handleCreateBusiness = async () => {
+    if (!newBusinessName.trim()) return;
+    try {
+      const name = newBusinessName.trim();
+      const res = await apiPost<{ business_id: number }>("/api/map/businesses", { name });
+      setNewBusinessName("");
+      setShowBusinessInput(false);
+      onBusinessCreated?.(res.business_id, name);
+    } catch { /* ignore */ }
+  };
+
   return (
     <>
       <div className="map-top-bar">
         <div className="map-top-bar__left">
           <label>
             <span className="map-selector-row__label">사업장: </span>
-            <select
-              className="map-top-bar__dropdown"
-              value={selectedBusiness}
-              onChange={(e) => onBusinessChange(e.target.value)}
-            >
-              <option value="">사업장 선택</option>
-              {businesses.map((b) => (
-                <option key={b.business_id} value={String(b.business_id)}>
-                  {b.name}
-                </option>
-              ))}
-            </select>
+            {showBusinessInput ? (
+              <span style={{ display: "inline-flex", gap: "4px" }}>
+                <input
+                  className="input"
+                  style={{ width: "120px", padding: "4px 8px", fontSize: "var(--font-size-sm)" }}
+                  placeholder="사업장 이름"
+                  value={newBusinessName}
+                  onChange={(e) => setNewBusinessName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCreateBusiness()}
+                  autoFocus
+                />
+                <button className="btn btn--primary" style={{ padding: "4px 8px", fontSize: "var(--font-size-sm)" }} onClick={handleCreateBusiness}>확인</button>
+                <button className="btn btn--outline" style={{ padding: "4px 8px", fontSize: "var(--font-size-sm)" }} onClick={() => { setShowBusinessInput(false); setNewBusinessName(""); }}>취소</button>
+              </span>
+            ) : (
+              <select
+                className="map-top-bar__dropdown"
+                value={selectedBusiness}
+                onChange={(e) => handleBusinessSelect(e.target.value)}
+              >
+                <option value="">사업장 선택</option>
+                {businesses.map((b) => (
+                  <option key={b.business_id} value={String(b.business_id)}>
+                    {b.name}
+                  </option>
+                ))}
+                <option value="__add__">+ 새 사업장 추가</option>
+              </select>
+            )}
           </label>
           <label>
             <span className="map-selector-row__label">영역: </span>
@@ -68,6 +110,7 @@ export function MapTopBar({
               className="map-top-bar__dropdown"
               value={selectedArea}
               onChange={(e) => onAreaChange(e.target.value)}
+              disabled={!selectedBusiness}
             >
               <option value="">영역 선택</option>
               {areas.map((a) => (

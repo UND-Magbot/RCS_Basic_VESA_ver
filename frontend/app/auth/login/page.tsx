@@ -4,17 +4,8 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import type { LoginFormState, LoginFormErrors } from "@/lib/types/auth";
 import { apiFetch } from "@/lib/api";
-import { MENU_ITEMS } from "@/lib/types/settings";
-import type { MenuPermissionItem } from "@/lib/types/settings";
-import { getMyMenuPermissions } from "@/lib/api/settings";
-import { defaultNavItems } from "@/app/components/shell/SideNav";
 import { ForgotPasswordModal } from "./ForgotPasswordModal";
 import "./login.css";
-
-const ID_REGEX = /^[a-zA-Z][a-zA-Z0-9]*$/;
-const PW_REGEX = /^(?=.*[a-zA-Z])(?=.*\d)(?=.*[^a-zA-Z0-9\s]).{6,}$/;
-
-const DEFAULT_USER_MENUS = new Set(["모니터링", "설정"]);
 
 export default function LoginPage() {
   const router = useRouter();
@@ -67,27 +58,7 @@ export default function LoginPage() {
       localStorage.setItem("user_login_id", res.user.login_id === "admin" ? "관리자" : res.user.login_id);
       localStorage.setItem("user_role", String(res.user.role));
 
-      // 메뉴 권한 로드
-      const isAdmin = res.user.role === 1;
-      let allowedLabels: string[];
-
-      try {
-        const perms = await getMyMenuPermissions();
-        allowedLabels = perms.filter((p) => p.isAllowed).map((p) => p.menuLabel);
-      } catch {
-        allowedLabels = [];
-      }
-
-      // 권한이 없으면: 관리자는 전체 메뉴, 일반 사용자는 기본 메뉴
-      if (allowedLabels.length === 0) {
-        allowedLabels = isAdmin
-          ? MENU_ITEMS.map((m) => m.label)
-          : MENU_ITEMS.filter((m) => DEFAULT_USER_MENUS.has(m.label)).map((m) => m.label);
-      }
-      localStorage.setItem("allowed_menus", JSON.stringify(allowedLabels));
-
-      const firstMenu = defaultNavItems.find((nav) => allowedLabels.includes(nav.label));
-      router.push(firstMenu?.href ?? "/monitoring");
+      router.push("/monitoring");
     } catch (err: any) {
       const msg = err?.message ?? "";
       if (msg.includes("존재")) {
@@ -142,14 +113,6 @@ export default function LoginPage() {
         <button className="login__btn" type="submit">
           로그인
         </button>
-
-        {/* <button
-          className="login__forgot"
-          type="button"
-          onClick={() => setForgotOpen(true)}
-        >
-          비밀번호 찾기
-        </button> */}
       </form>
 
       <ForgotPasswordModal

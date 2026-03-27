@@ -1,89 +1,111 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
-from datetime import datetime
-
-# ─── 상태 매핑 ────────────────────────────────────────────────────────────────
-TASK_STATUS_MAP = {0: "대기", 1: "실행중", 2: "완료", 3: "정지", 4: "에러"}
+from datetime import date, datetime
 
 
-# ─── 웨이포인트 스키마 ──────────────────────────────────────────────────────────
-class WaypointCreate(BaseModel):
-    order: int = Field(..., ge=0, description="방문 순서 (0부터 시작)")
+# ── 경로 스키마 ──
+
+class WaypointInput(BaseModel):
+    poi_id: int
+    order: int
+    waypoint_type: str  # pickup / dropoff / standby
+    wait_sec: int = 0
+
+
+class TaskRouteCreate(BaseModel):
+    name: str
+    waypoints: list[WaypointInput]
+
+
+class TaskRouteUpdate(BaseModel):
     name: Optional[str] = None
-    x: float
-    y: float
-    orientation: float = 0.0
-    wait_seconds: float = Field(default=0.0, ge=0)
+    waypoints: Optional[list[WaypointInput]] = None
 
 
-class WaypointResponse(WaypointCreate):
+class WaypointResponse(BaseModel):
     id: int
+    poi_id: int
+    poi_name: Optional[str] = None
+    order: int
+    waypoint_type: str
+    wait_sec: int = 0
+    world_x: Optional[float] = None
+    world_y: Optional[float] = None
 
-    class Config:
-        from_attributes = True
-
-
-# ─── 작업 스키마 ───────────────────────────────────────────────────────────────
-class TaskCreate(BaseModel):
-    name: str = Field(..., max_length=100)
-    description: Optional[str] = None
-    robot_id: int
-    repeat_count: int = Field(default=-1, ge=-1, description="-1=무한반복, 0 이상=반복 횟수")
-    waypoints: list[WaypointCreate] = Field(..., min_length=1)
+    model_config = {"from_attributes": True}
 
 
-class TaskUpdate(BaseModel):
-    name: Optional[str] = Field(None, max_length=100)
-    description: Optional[str] = None
-    repeat_count: Optional[int] = Field(None, ge=-1)
-    waypoints: Optional[list[WaypointCreate]] = None
-
-
-class TaskResponse(BaseModel):
+class TaskRouteResponse(BaseModel):
     id: int
     name: str
-    description: Optional[str]
-    robot_id: int
-    repeat_count: int
-    current_loop: int
-    current_waypoint_order: int
-    status: int
-    status_name: str
-    waypoints: list[WaypointResponse]
-    created_at: datetime
-    updated_at: datetime
+    waypoints: list[WaypointResponse] = []
+    is_active: bool = True
+    created_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
-    @classmethod
-    def from_orm_with_status(cls, task):
-        return cls(
-            id=task.id,
-            name=task.name,
-            description=task.description,
-            robot_id=task.robot_id,
-            repeat_count=task.repeat_count,
-            current_loop=task.current_loop,
-            current_waypoint_order=task.current_waypoint_order,
-            status=task.status,
-            status_name=TASK_STATUS_MAP.get(task.status, "알 수 없음"),
-            waypoints=task.waypoints,
-            created_at=task.created_at,
-            updated_at=task.updated_at,
-        )
+    model_config = {"from_attributes": True}
 
 
-class TaskListResponse(BaseModel):
-    total: int
-    items: list[TaskResponse]
+# ── 스케줄 스키마 ──
 
-
-# ─── POI 스키마 (로봇 맵에서 조회) ────────────────────────────────────────────
-class PoiResponse(BaseModel):
-    id: str
+class ScheduledTaskCreate(BaseModel):
     name: str
-    x: float
-    y: float
-    orientation: float = 0.0
-    poi_type: str = "unknown"
+    robot_id: int
+    route_id: int
+    start_time: str           # "HH:MM"
+    end_time: Optional[str] = None
+    repeat_type: str = "once"  # once / daily / weekly
+    repeat_days: Optional[str] = None  # "1,2,3,4,5"
+    start_date: date
+    end_date: Optional[date] = None
+
+
+class ScheduledTaskUpdate(BaseModel):
+    name: Optional[str] = None
+    robot_id: Optional[int] = None
+    route_id: Optional[int] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    repeat_type: Optional[str] = None
+    repeat_days: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    is_active: Optional[bool] = None
+
+
+class ScheduledTaskResponse(BaseModel):
+    id: int
+    name: str
+    route_id: int
+    route_name: Optional[str] = None
+    robot_name: Optional[str] = None
+    start_time: str
+    end_time: Optional[str] = None
+    repeat_type: str
+    repeat_days: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    is_active: bool
+    last_run_at: Optional[datetime] = None
+    next_run_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ── 이력 스키마 ──
+
+class TaskHistoryResponse(BaseModel):
+    id: int
+    task_id: Optional[int] = None
+    task_name: Optional[str] = None
+    route_name: Optional[str] = None
+    robot_id: int
+    robot_name: Optional[str] = None
+    pickup_poi_name: Optional[str] = None
+    dropoff_poi_name: Optional[str] = None
+    status: str
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+    model_config = {"from_attributes": True}

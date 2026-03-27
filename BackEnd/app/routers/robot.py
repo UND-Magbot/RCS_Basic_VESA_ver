@@ -1,9 +1,8 @@
 import logging
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from app.robot_api.robot_live_service import fetch_all_robots_live
-from app.robot_api.robot_task_service import get_loop_status
 
 from app.database import get_db
 from app.models.robot import Robot
@@ -36,19 +35,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/robots", tags=["로봇 관리"])
 
 
-# ── 로봇 정보/Lits API 호출 ──
-ROBOTS = [
-    # {"ip": "192.168.10.42", "secret": "19a11878aaab420fba94577ce3620dce"},
-    # {"ip": "192.168.10.44", "secret": "19a11878aaab420fba94577ce3620dce"},
-    # {"ip": "192.168.10.46", "secret": "19a11878aaab420fba94577ce3620dce"},
-    # {"ip": "192.168.10.212", "secret": "19a11878aaab420fba94577ce3620dce"},
-    # {"ip": "192.168.10.73", "secret": "19a11878aaab420fba94577ce3620dce"},
-    {"ip": "192.168.0.27", "secret": "19a11878aaab420fba94577ce3620dce"},
-    {"ip": "192.168.0.30", "secret": "19a11878aaab420fba94577ce3620dce"},
-    {"ip": "192.168.0.31", "secret": "19a11878aaab420fba94577ce3620dce"},
-    {"ip": "192.168.0.33", "secret": "19a11878aaab420fba94577ce3620dce"},
-    {"ip": "192.168.0.34", "secret": "19a11878aaab420fba94577ce3620dce"},
-]
+# ── 로봇 시크릿 (AutoXing 기본값) ──
+DEFAULT_SECRET = "19a11878aaab420fba94577ce3620dce"
+
+
+def _get_robot_list(db: Session) -> list[dict]:
+    """DB에서 활성 로봇 IP 목록 → fetch_all_robots_live용 리스트"""
+    robots = db.query(Robot).filter(Robot.is_active == True, Robot.ip_address != None).all()
+    return [{"ip": r.ip_address, "secret": DEFAULT_SECRET} for r in robots if r.ip_address]
 
 @router.get("/live")
 def api_get_robots_live(db: Session = Depends(get_db)):
@@ -89,9 +83,7 @@ def api_get_robots_live(db: Session = Depends(get_db)):
             ip_to_robot_id[r.ip_address] = r.id
 
     # ── 2차: 실시간 API로 상태 오버레이 ──
-    live = fetch_all_robots_live(ROBOTS)
-    CHARGING_STATUSES = {"charging", "charging_route", "low_battery_charging"}
-
+    live = fetch_all_robots_live(_get_robot_list(db))
     for live_item in live.get("items", []):
         live_ip = live_item.get("IP", "")
         live_sn = live_item.get("SN", "")
@@ -119,12 +111,6 @@ def api_get_robots_live(db: Session = Depends(get_db)):
             if not target["IP"] and live_ip:
                 target["IP"] = live_ip
 
-            # CHARGING 오버라이드
-            robot_id = ip_to_robot_id.get(live_ip)
-            if robot_id is not None and target["RUNSTATE"] == "EXECUTING":
-                task_status = get_loop_status(robot_id).get("status", "")
-                if task_status in CHARGING_STATUSES:
-                    target["RUNSTATE"] = "CHARGING"
         else:
             # DB에 없는 새 로봇 → 리스트에 추가
             if live_sn and live_sn != "N/A":
@@ -152,7 +138,7 @@ def api_get_robots_live(db: Session = Depends(get_db)):
 @router.post("/sync-live")
 def api_sync_live_robots(db: Session = Depends(get_db)):
     """라이브 로봇 정보를 DB robots 테이블에 동기화 (upsert by serial_number)"""
-    live = fetch_all_robots_live(ROBOTS)
+    live = fetch_all_robots_live(_get_robot_list(db))
     items = live.get("items", [])
 
     created = 0
@@ -205,6 +191,57 @@ def api_sync_live_robots(db: Session = Depends(get_db)):
         "updated": updated,
         "skipped": skipped,
         "synced": synced,
+    }
+
+
+@router.post("/register-by-ip", status_code=201)
+def api_register_by_ip(ip: str = Query(...), db: Session = Depends(get_db)):
+    """IP 입력으로 로봇 자동 등록 — 로봇 API에서 SN/이름/모델을 가져와 DB에 저장"""
+    from app.robot_api.robot_live_service import fetch_robot_live
+
+    # 이미 등록된 IP인지 확인
+    existing = db.query(Robot).filter(Robot.ip_address == ip, Robot.is_active == True).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"이미 등록된 로봇입니다 (IP: {ip}, 이름: {existing.name})")
+
+    # 로봇에서 정보 가져오기
+    live = fetch_robot_live(ip, DEFAULT_SECRET)
+    if live.get("ONLINE") != "Online":
+        raise HTTPException(status_code=502, detail=f"로봇에 연결할 수 없습니다 (IP: {ip})")
+
+    sn = live.get("SN", "")
+    if not sn or sn == "N/A":
+        raise HTTPException(status_code=502, detail=f"로봇 SN을 가져올 수 없습니다 (IP: {ip})")
+
+    # SN 중복 확인
+    existing_sn = db.query(Robot).filter(Robot.serial_number == sn, Robot.is_active == True).first()
+    if existing_sn:
+        raise HTTPException(status_code=409, detail=f"이미 등록된 SN입니다 ({sn})")
+
+    name = live.get("ROBOTNAME", "") or sn
+    model = live.get("MODEL", "")
+
+    new_robot = Robot(
+        name=name if name != "N/A" else sn,
+        serial_number=sn,
+        model=model if model and model != "N/A" else None,
+        ip_address=ip,
+    )
+    db.add(new_robot)
+    db.commit()
+    db.refresh(new_robot)
+
+    log_activity("robot", "robot_create",
+                 f"로봇 등록 (IP 자동): {new_robot.name} (SN: {sn}, IP: {ip})",
+                 source="api_register_by_ip")
+
+    return {
+        "id": new_robot.id,
+        "name": new_robot.name,
+        "serial_number": sn,
+        "model": new_robot.model,
+        "ip_address": ip,
+        "message": f"로봇 등록 완료: {new_robot.name}",
     }
 
 
@@ -345,6 +382,23 @@ def api_get_standby_pois(sn: str, db: Session = Depends(get_db)):
     return result
 
 
+@router.get("/job-status")
+def api_get_all_job_status():
+    """모든 로봇의 현재 작업 상태 조회"""
+    from app.services.jack_service import get_all_job_status
+    return get_all_job_status()
+
+
+@router.get("/job-status/{robot_ip}")
+def api_get_job_status(robot_ip: str):
+    """특정 로봇의 현재 작업 상태 조회"""
+    from app.services.jack_service import get_job_status
+    status = get_job_status(robot_ip)
+    if not status:
+        return {"status": "idle"}
+    return status
+
+
 @router.get("/{robot_id}", response_model=RobotResponse)
 def api_get_robot(robot_id: int, db: Session = Depends(get_db)):
     """로봇 단건 조회"""
@@ -389,3 +443,199 @@ def api_update_robot_status(
     ※ AutoXing SDK/API 연동 지점: 이 엔드포인트로 로봇 상태 데이터를 전송합니다.
     """
     return update_robot_status(db, robot_id, data)
+
+
+@router.post("/cancel-move/{robot_ip}")
+def api_cancel_robot_move(robot_ip: str):
+    """로봇의 현재 이동 취소"""
+    import requests as http_req
+    try:
+        r = http_req.patch(
+            f"http://{robot_ip}:8090/chassis/moves/current",
+            json={"state": "cancelled"}, timeout=5
+        )
+        return {"message": "이동 취소 완료", "status": r.status_code}
+    except Exception as e:
+        return {"message": f"취소 실패: {e}", "status": 500}
+
+
+@router.get("/target/{robot_ip}")
+def api_get_robot_target(robot_ip: str):
+    """로봇의 현재 이동 목표 조회"""
+    import requests as http_req
+    try:
+        r = http_req.get(f"http://{robot_ip}:8090/chassis/moves/current", timeout=3)
+        if r.status_code == 404:
+            return {"state": "idle", "target_x": None, "target_y": None}
+        data = r.json()
+        return {
+            "state": data.get("state", ""),
+            "type": data.get("type", ""),
+            "target_x": data.get("target_x"),
+            "target_y": data.get("target_y"),
+        }
+    except Exception:
+        return {"state": "error", "target_x": None, "target_y": None}
+
+
+# ── 원격 제어 API ──
+
+@router.post("/remote/control-mode/{robot_ip}")
+def api_set_control_mode(robot_ip: str, body: dict):
+    """로봇 제어 모드 변경 (auto/manual/remote)"""
+    import requests as req
+    mode = body.get("mode", "auto")
+    try:
+        r = req.post(
+            f"http://{robot_ip}:8090/services/wheel_control/set_control_mode",
+            json={"control_mode": mode},
+            timeout=5,
+        )
+        return {"status": r.status_code, "mode": mode}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remote/twist/{robot_ip}")
+def api_send_twist(robot_ip: str, body: dict):
+    """WebSocket /twist 명령을 프록시로 전송"""
+    import websocket
+    lv = body.get("linear_velocity", 0)
+    av = body.get("angular_velocity", 0)
+    try:
+        ws = websocket.create_connection(
+            f"ws://{robot_ip}:8090/ws/v2/topics", timeout=3
+        )
+        ws.send(
+            __import__("json").dumps({
+                "topic": "/twist",
+                "linear_velocity": lv,
+                "angular_velocity": av,
+            })
+        )
+        ws.close()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remote/cancel-move/{robot_ip}")
+def api_cancel_move(robot_ip: str):
+    """현재 이동 취소"""
+    import requests as req
+    try:
+        r = req.patch(
+            f"http://{robot_ip}:8090/chassis/moves/current",
+            json={"state": "cancelled"},
+            timeout=5,
+        )
+        return {"status": r.status_code}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@router.get("/speed/{robot_ip}")
+def api_get_speed(robot_ip: str):
+    """로봇 속도 조회"""
+    import requests as req
+    try:
+        r = req.get(f"http://{robot_ip}:8090/robot-params", timeout=5)
+        params = r.json()
+        return {
+            "max_forward_velocity": params.get("/wheel_control/max_forward_velocity", 1.2),
+            "max_backward_velocity": abs(params.get("/wheel_control/max_backward_velocity", -0.5)),
+            "max_angular_velocity": params.get("/wheel_control/max_angular_velocity", 1.2),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/speed/{robot_ip}")
+def api_set_speed(robot_ip: str, body: dict):
+    """로봇 속도 변경"""
+    import requests as req
+    try:
+        speed = body.get("max_forward_velocity", 1.2)
+        req.post(f"http://{robot_ip}:8090/robot-params",
+                 json={"/wheel_control/max_forward_velocity": speed}, timeout=5)
+        return {"ok": True, "max_forward_velocity": speed}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remote/stop-all/{robot_ip}")
+def api_stop_all(robot_ip: str):
+    """모든 작업 정지 (이동 취소 + 잭 다운 + 스케줄/수동 배차 중단)"""
+    import requests as req
+    # 1) 로봇 이동 취소
+    try:
+        req.patch(
+            f"http://{robot_ip}:8090/chassis/moves/current",
+            json={"state": "cancelled"},
+            timeout=5,
+        )
+    except Exception:
+        pass
+    # 2) 잭이 올라가 있으면 잭 다운
+    try:
+        req.post(f"http://{robot_ip}:8090/services/jack_down", json={}, timeout=5)
+    except Exception:
+        pass
+    # 3) 백엔드 스케줄/수동 배차 작업 중단
+    from app.services.jack_service import stop_robot_job
+    stop_robot_job(robot_ip)
+    return {"ok": True, "message": "모든 작업이 정지되었습니다"}
+
+
+@router.post("/remote/dock/{robot_ip}")
+def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
+    """충전소로 복귀"""
+    import requests as req
+    # DB에서 충전소 POI 찾기
+    charger = db.query(MapPOI).filter(
+        MapPOI.poi_type == "charging",
+        MapPOI.is_active == True,
+    ).first()
+    if not charger or not charger.world_x or not charger.world_y:
+        raise HTTPException(status_code=404, detail="충전소 POI를 찾을 수 없습니다")
+    try:
+        # 도킹포인트 좌표 조회
+        from app.services.jack_service import get_docking_point_coords
+        dock_coords = get_docking_point_coords(robot_ip, charger.name)
+        if dock_coords:
+            cx, cy, cyaw = dock_coords
+        else:
+            cx, cy, cyaw = charger.world_x, charger.world_y, charger.angle or 0
+        r = req.post(
+            f"http://{robot_ip}:8090/chassis/moves",
+            json={
+                "creator": "rcs",
+                "type": "charge",
+                "target_x": cx,
+                "target_y": cy,
+                "target_ori": cyaw,
+                "charge_retry_count": 3,
+            },
+            timeout=5,
+        )
+        return {"status": r.status_code, "charger": charger.name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remote/jack/{robot_ip}/{action}")
+def api_jack_control(robot_ip: str, action: str):
+    """잭 업/다운 제어"""
+    import requests as req
+    if action not in ("jack_up", "jack_down"):
+        raise HTTPException(status_code=400, detail="action must be jack_up or jack_down")
+    try:
+        r = req.post(
+            f"http://{robot_ip}:8090/services/{action}",
+            json={},
+            timeout=5,
+        )
+        return {"status": r.status_code}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

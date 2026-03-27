@@ -7,10 +7,13 @@ export type PoiMarkerData = {
   id: string;
   label: string;
   position: MapPixelCoord;
-  type: "workstation" | "charging" | "pickup" | "dropoff";
+  type: "workstation" | "charging" | "pickup" | "dropoff" | "jack";
   renderKind?: "circle" | "triangle";
   angle?: number;
   dockingRadius?: number;
+  /** 잭킹 POI: 랙 크기 (픽셀 단위, grid_resolution 적용 후) */
+  rackWidthPx?: number;
+  rackDepthPx?: number;
 };
 
 export type WaypointMarkerData = {

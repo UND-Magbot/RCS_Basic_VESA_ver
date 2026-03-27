@@ -3,11 +3,7 @@ from fastapi import HTTPException, status
 from passlib.hash import bcrypt
 
 from app.models.user import User, UserRole
-from app.models.menu import Menu, UserPermission
 from app.schemas.user import UserCreate, UserUpdate, UserResponse, ROLE_MAP
-
-# 일반 사용자 기본 메뉴 권한
-DEFAULT_USER_MENU_KEYS = ("monitoring", "settings")
 
 
 def _to_response(user: User) -> UserResponse:
@@ -45,20 +41,6 @@ def create_user(db: Session, data: UserCreate) -> UserResponse:
 
     user_role = UserRole(user_id=user.id, role=data.role)
     db.add(user_role)
-
-    # 관리자(role=1)는 전체 메뉴, 일반 사용자(role=2)는 기본 메뉴 권한 부여
-    if data.role == 1:
-        all_menus = db.query(Menu).all()
-        for menu in all_menus:
-            db.add(UserPermission(user_id=user.id, menu_id=menu.id))
-    else:
-        default_menus = (
-            db.query(Menu)
-            .filter(Menu.menu_key.in_(DEFAULT_USER_MENU_KEYS))
-            .all()
-        )
-        for menu in default_menus:
-            db.add(UserPermission(user_id=user.id, menu_id=menu.id))
 
     db.commit()
     db.refresh(user)

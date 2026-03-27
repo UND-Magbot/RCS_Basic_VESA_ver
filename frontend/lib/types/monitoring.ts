@@ -2,34 +2,18 @@ export type DevicePower = "online" | "offline";
 
 export type DeviceStatus = "idle" | "running" | "charging" | "error" | "warning" | "disable";
 
-export type TaskState = "running" | "completed" | "error";
-
 export type DeviceRowProps = {
   id: string;
   name: string;
   power: DevicePower;
   battery: string;
   status: DeviceStatus;
+  ip?: string;
   isExpanded?: boolean;
   onToggleExpand?: (deviceId: string) => void;
   onInfo?: (deviceId: string) => void;
-  onReturn?: (deviceId: string) => void;
-  onStop?: (deviceId: string) => void;
+  onRemote?: (deviceId: string, ip: string) => void;
 };
-
-export type MockDevice = DeviceRowProps & { id: string };
-
-export type TaskRowProps = {
-  robot: string;
-  endpoint: string;
-  state: TaskState;
-  duration: string;
-  isExpanded?: boolean;
-  onToggleExpand?: () => void;
-  onInfo?: () => void;
-};
-
-export type MockTask = TaskRowProps & { taskNum: string };
 
 export type DeviceTaskState =
   | "pending"
@@ -61,8 +45,8 @@ export type DeviceTask = {
   state: DeviceTaskState;
   type: string;
   createTime: string;
-  start: string; // POI name (출발지)
-  end: string; // POI name (도착지)
+  start: string;
+  end: string;
   oper: string;
 };
 
@@ -89,36 +73,4 @@ export type LayerButtonProps = {
 export type MapModeButtonProps = {
   mapMode: "2d" | "3d";
   onMapModeChange: (mode: "2d" | "3d") => void;
-};
-
-export type TaskInfoStatus = "completed" | "failed" | "running" | "pending";
-
-export type TaskLogLevel = "info" | "warning" | "error";
-
-export type TaskLogEntry = {
-  message: string;
-  timestamp: string;
-  level: TaskLogLevel;
-};
-
-export type TaskDetail = {
-  waybillNumber: string;
-  business: string;
-  taskType: string;
-  priority: string;
-  start: string;
-  end: string;
-  pass: string | null;
-  startTime: string;
-  endTime: string;
-  status: TaskInfoStatus;
-  routeMode: string;
-  detourRadius: number;
-  speed: number;
-  logs: TaskLogEntry[];
-};
-
-export type TaskInfoModalProps = {
-  taskId: string | null;
-  onClose: () => void;
 };

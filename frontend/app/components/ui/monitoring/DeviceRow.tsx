@@ -23,22 +23,17 @@ export function DeviceRow({
   power,
   battery,
   status,
+  ip,
   isExpanded = false,
   onToggleExpand,
   onInfo,
-  onReturn,
-  onStop,
+  onRemote,
 }: DeviceRowProps) {
   const expanded = isExpanded;
   const isOffline = power === "offline";
-  const isRunning = status === "running";
   const isInvalidOnlineDisable = power === "online" && status === "disable";
   const effectiveStatus = isOffline ? "disable" : status;
 
-  const isCharging = status === "charging";
-  const canSuspend = !isOffline && !isInvalidOnlineDisable && (isRunning || isCharging);
-  const canCharge = !isOffline && !isInvalidOnlineDisable;
-  const canNav = !isOffline && !isInvalidOnlineDisable;
   const canInfo = !isInvalidOnlineDisable;
 
   const batteryNum = parseFloat(battery);
@@ -70,15 +65,6 @@ export function DeviceRow({
           className="device-row__actions"
           onClick={(event) => event.stopPropagation()}
         >
-          <IconButton aria-label="Suspend" disabled={!canSuspend} onClick={() => onStop?.(id)}>
-            정지
-          </IconButton>
-          <IconButton aria-label="Return" disabled={!canCharge} onClick={() => onReturn?.(id)}>
-            복귀
-          </IconButton>
-          {/* <IconButton aria-label="Navigate" disabled={!canNav}>
-            네비
-          </IconButton> */}
           <IconButton
             aria-label="Info"
             disabled={!canInfo}
@@ -86,6 +72,15 @@ export function DeviceRow({
           >
             정보
           </IconButton>
+          {!isOffline && ip && (
+            <IconButton
+              aria-label="Remote"
+              onClick={() => onRemote?.(id, ip)}
+              style={{ background: "rgba(90,143,245,0.15)", color: "#5a8ff5", border: "1px solid rgba(90,143,245,0.4)" }}
+            >
+              원격제어
+            </IconButton>
+          )}
         </div>
       ) : null}
     </div>

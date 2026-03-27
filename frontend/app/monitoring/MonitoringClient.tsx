@@ -12,7 +12,8 @@ import { OverlayCard } from "../components/ui/monitoring/OverlayCard";
 import { LayerButton } from "../components/ui/monitoring/LayerButton";
 import { MapModeButton } from "../components/ui/monitoring/MapModeButton";
 import { DeviceRow } from "../components/ui/monitoring/DeviceRow";
-// import { TaskRow } from "../components/ui/monitoring/TaskRow";
+import { RemoteControlModal } from "../components/ui/monitoring/RemoteControlModal";
+import { JobStatusPanel } from "../components/ui/monitoring/JobStatusPanel";
 import { RobotDeviceInfo } from "../components/ui/RobotDeviceInfo";
 import type { RobotDevice, RunState } from "@/lib/types/robots";
 import {
@@ -23,12 +24,7 @@ import {
   formatBattery,
   formatLiveBattery,
 } from "@/lib/utils/robotStatus";
-import { TaskInfoModal } from "../components/ui/monitoring/TaskInfoModal";
-import { CreateTaskModal } from "../components/ui/tasks/CreateTaskModal";
-import { ConfirmModal } from "../components/ui/robots/ConfirmModal";
 import { useAlert } from "@/lib/context/AlertContext";
-import { mockTasks } from "@/lib/mock/tasks";
-import type { TaskState } from "@/lib/types/monitoring";
 import { SearchInput } from "../components/ui/SearchInput";
 import { Panel } from "../components/ui/Panel";
 import { SideNav, defaultNavItems } from "../components/shell/SideNav";
@@ -43,15 +39,11 @@ const MonitoringMap3D = dynamic(
     })),
   { ssr: false, loading: () => <div className="monitoring-map3d-loading">Loading 3D...</div> }
 );
-import {
-  mockVirtualWalls,
-} from "@/lib/mock/mapMarkers";
 import type { PoiMarkerData, RobotMarkerData, RouteSegment, WaypointMarkerData } from "@/lib/types/map-markers";
-import { LoadingScreen } from "../components/ui/LoadingScreen";
 import { BusinessSelectBox } from "../components/ui/monitoring/BusinessSelectBox";
-import { FireAlertOverlay } from "../components/ui/monitoring/FireAlertOverlay";
-import { EmergencyStopOverlay } from "../components/ui/monitoring/EmergencyStopOverlay";
-import { apiFetch, apiPost, ApiError } from "@/lib/api";
+import { JackTestPanel } from "../components/ui/monitoring/JackTestPanel";
+import "../components/ui/monitoring/JackTestPanel.css";
+import { apiFetch } from "@/lib/api";
 import type { Business } from "@/lib/types/robots";
 import type { MapMeta } from "@/lib/types/map";
 
@@ -79,10 +71,12 @@ type MapItem = {
 
 function mapPoiTypeToMonitorType(
   apiType: string
-): "workstation" | "charging" | "pickup" | "dropoff" {
+): "workstation" | "charging" | "pickup" | "dropoff" | "jack" {
   switch (apiType) {
     case "charging":
       return "charging";
+    case "jack":
+      return "jack";
     case "standby":
       return "workstation";
     default:
@@ -126,6 +120,7 @@ type ApiRobotFull = {
 };
 
 type LiveRobot = {
+  ID: number;
   IP: string;
   SN: string;
   ROBOTNAME: string;
@@ -165,29 +160,20 @@ type Props = {
 export function MonitoringClient({ initialDateTime }: Props) {
   const [navCollapsed, setNavCollapsed] = useState(true);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
   const [mapMode, setMapMode] = useState<"2d" | "3d">("2d");
-  const [taskTab, setTaskTab] = useState<TaskState>("running");
   const [overlayItems, setOverlayItems] = useState(defaultOverlayItems);
   const [isLayerOpen, setIsLayerOpen] = useState(false);
   const [expandedDeviceId, setExpandedDeviceId] = useState<string | null>(null);
-  const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [remoteTarget, setRemoteTarget] = useState<{ id: string; name: string; ip: string } | null>(null);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [devicePage, setDevicePage] = useState(1);
+  const DEVICE_PAGE_SIZE = 5;
   const [openDeviceId, setOpenDeviceId] = useState<string | null>(null);
   const [togglingDeviceId, setTogglingDeviceId] = useState<string | null>(null);
-  const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   const [mapSrc, setMapSrc] = useState("");
-  const [createTaskOpen, setCreateTaskOpen] = useState(false);
-  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
-  const { showAlert, showInfo } = useAlert();
+  const { showAlert } = useAlert();
   const lastBatteryAlertRef = useRef<string | null>(null);
-  const [isRunning, setIsRunning] = useState(false);
-  const [loopRunning, setLoopRunning] = useState(false);
-  const [loopStopping, setLoopStopping] = useState(false);
-  const [emergencyStopped, setEmergencyStopped] = useState(false);
-  const [fireAlert, setFireAlert] = useState(false);
-  const [fireTestMode, setFireTestMode] = useState(false);
   const [deviceSearch, setDeviceSearch] = useState("");
-  const [taskSearch, setTaskSearch] = useState("");
   // simulatedRobots는 아래 useMemo로 계산 (useEffect+setState 연쇄 리렌더 방지)
 
   // ── 실제 로봇 데이터 (mock 대체) ──
@@ -201,11 +187,6 @@ export function MonitoringClient({ initialDateTime }: Props) {
     // TODO: Replace with real API call
     setTimeout(() => setTogglingDeviceId(null), 300);
   }, [togglingDeviceId]);
-
-  // const taskCountByRobot = mockTasks.reduce((acc, task) => {
-  //   acc[task.robot] = (acc[task.robot] || 0) + 1;
-  //   return acc;
-  // }, {} as Record<string, number>);
 
   const [isLoading, setIsLoading] = useState(true);
   const [robotsLoaded, setRobotsLoaded] = useState(false);
@@ -233,15 +214,18 @@ export function MonitoringClient({ initialDateTime }: Props) {
   const [apiRobots, setApiRobots] = useState<ApiRobot[]>([]);
   const [robotPoses, setRobotPoses] = useState<Map<string, { pos: [number, number]; ori: number }>>(new Map());
   const poseWsRefs = useRef<Map<string, WebSocket>>(new Map());
+  const [robotTargets, setRobotTargets] = useState<Map<string, { x: number; y: number } | null>>(new Map());
+  const poseBufferRef = useRef<Map<string, { pos: [number, number]; ori: number }>>(new Map());
+  const poseFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 로봇 목록 + 실시간 데이터 API 응답 완료 시 로딩 종료 (데이터 없어도 종료)
   useEffect(() => {
     if (robotsLoaded && liveLoaded) setIsLoading(false);
   }, [robotsLoaded, liveLoaded]);
 
-  // 5초 타임아웃 — API 응답 없어도 강제 로딩 종료
+  // 10초 타임아웃 — API 응답 없어도 강제 로딩 종료
   useEffect(() => {
-    const t = setTimeout(() => setIsLoading(false), 5000);
+    const t = setTimeout(() => setIsLoading(false), 10000);
     return () => clearTimeout(t);
   }, []);
 
@@ -454,18 +438,17 @@ export function MonitoringClient({ initialDateTime }: Props) {
       let px = p.x + halfW;
       let py = p.y + halfH;
 
-      // 충전소: DB 좌표가 실제 위치보다 앞에 설정되어 있으므로
-      // 충전소 angle 방향(뒤쪽)으로 0.9m 이동하여 실제 위치로 보정
+      // 충전소: DB 좌표(접근 포인트)에서 angle 반대 방향 0.9m = 실제 충전기 위치
       if (
         p.type === "charging" &&
         p.angle != null &&
         mapMeta &&
         mapMeta.grid_resolution > 0
       ) {
-        const DOCKING_OFFSET_M = 1.4;
+        const DOCKING_OFFSET_M = 0.9;
         const offsetPx = DOCKING_OFFSET_M / mapMeta.grid_resolution;
-        px += offsetPx * Math.cos(p.angle);
-        py -= offsetPx * Math.sin(p.angle);
+        px -= offsetPx * Math.cos(p.angle);
+        py += offsetPx * Math.sin(p.angle);
       }
 
       if (p.type === "waypoint") {
@@ -475,14 +458,22 @@ export function MonitoringClient({ initialDateTime }: Props) {
           position: { x: px, y: py },
         });
       } else {
-        convertedPois.push({
+        const poiData: import("@/lib/types/map-markers").PoiMarkerData = {
           id: p.id,
           label: p.name,
           position: { x: px, y: py },
           type: mapPoiTypeToMonitorType(p.type),
           angle: p.angle ?? undefined,
           dockingRadius: p.dockingRadius ?? undefined,
-        });
+        };
+        // jack POI: rack.specs 크기를 픽셀로 변환
+        if (p.type === "jack" && mapMeta && mapMeta.grid_resolution > 0) {
+          const RACK_W = 0.66; // meters
+          const RACK_D = 0.70;
+          poiData.rackWidthPx = RACK_W / mapMeta.grid_resolution;
+          poiData.rackDepthPx = RACK_D / mapMeta.grid_resolution;
+        }
+        convertedPois.push(poiData);
       }
     }
 
@@ -546,7 +537,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
     () => apiBusinesses.flatMap((b) =>
       (b.areas ?? []).map((a) => ({
         id: `${b.business_id}:${a.area_id}`,
-        name: a.name,
+        name: (b.areas ?? []).length > 1 ? `${b.name} - ${a.name}` : b.name,
         value: String(a.area_id),
       }))
     ),
@@ -613,25 +604,23 @@ export function MonitoringClient({ initialDateTime }: Props) {
         try {
           const msg = JSON.parse(e.data);
           if (msg.topic === "/tracked_pose" && msg.pos) {
-            setRobotPoses((prev) => {
-              const existing = prev.get(robot.serial_number);
-              const newOri = msg.ori ?? 0;
-              // 값이 동일하면 이전 Map 참조를 그대로 반환 (불필요한 리렌더 방지)
-              if (
-                existing &&
-                existing.pos[0] === msg.pos[0] &&
-                existing.pos[1] === msg.pos[1] &&
-                existing.ori === newOri
-              ) {
-                return prev;
-              }
-              const next = new Map(prev);
-              next.set(robot.serial_number, {
-                pos: msg.pos,
-                ori: newOri,
-              });
-              return next;
+            poseBufferRef.current.set(robot.serial_number, {
+              pos: msg.pos,
+              ori: msg.ori ?? 0,
             });
+            if (!poseFlushTimerRef.current) {
+              poseFlushTimerRef.current = setTimeout(() => {
+                poseFlushTimerRef.current = null;
+                const buf = poseBufferRef.current;
+                if (buf.size === 0) return;
+                setRobotPoses((prev) => {
+                  const next = new Map(prev);
+                  buf.forEach((v, sn) => next.set(sn, v));
+                  buf.clear();
+                  return next;
+                });
+              }, 100);
+            }
           }
         } catch {
           // ignore
@@ -678,11 +667,40 @@ export function MonitoringClient({ initialDateTime }: Props) {
     fetchLiveOnce();
     livePollingRef.current = setInterval(fetchLive, 5000);
 
+    // 로봇 이동 목표 폴링
+    const fetchTargets = () => {
+      apiRobots.forEach((robot) => {
+        fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/robots/target/${robot.ip_address}`, { cache: "no-store" })
+          .then((r) => r.json())
+          .then((data) => {
+            setRobotTargets((prev) => {
+              const next = new Map(prev);
+              if (data.target_x != null && data.state === "moving") {
+                next.set(robot.serial_number, { x: data.target_x, y: data.target_y });
+              } else {
+                next.delete(robot.serial_number);
+              }
+              return next;
+            });
+          })
+          .catch(() => {
+            setRobotTargets((prev) => {
+              const next = new Map(prev);
+              next.delete(robot.serial_number);
+              return next;
+            });
+          });
+      });
+    };
+    const targetInterval = setInterval(fetchTargets, 2000);
+    fetchTargets();
+
     return () => {
       if (livePollingRef.current) {
         clearInterval(livePollingRef.current);
         livePollingRef.current = null;
       }
+      clearInterval(targetInterval);
     };
   }, [apiRobotsFull]);
 
@@ -723,6 +741,8 @@ export function MonitoringClient({ initialDateTime }: Props) {
         (pose.pos[1] - mapMeta.grid_origin_y) / mapMeta.grid_resolution;
 
       const robot = apiRobots.find((r) => r.serial_number === sn);
+
+      console.log(`[robot-marker] ${sn} WS pose=(${pose.pos[0].toFixed(3)},${pose.pos[1].toFixed(3)}) → px=(${ipx.toFixed(1)},${ipy.toFixed(1)})`);
 
       markers.push({
         robotId: sn,
@@ -771,7 +791,6 @@ export function MonitoringClient({ initialDateTime }: Props) {
       if (media.matches) {
         setNavCollapsed(true);
         setLeftCollapsed(true);
-        setRightCollapsed(true);
       }
     };
 
@@ -805,124 +824,6 @@ export function MonitoringClient({ initialDateTime }: Props) {
     setExpandedDeviceId((prev) => (prev === deviceId ? null : deviceId));
   };
 
-  const handleTaskToggle = (taskId: string) => {
-    setExpandedTaskId((prev) => (prev === taskId ? null : taskId));
-  };
-
-
-  // ─── Convoy 대열 작업 제어 ───
-
-  const handleStartAll = async () => {
-    try {
-      await apiPost("/api/convoy/start", {});
-      setLoopRunning(true);
-      setIsRunning(true);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "작업을 시작하지 못했습니다.";
-      const code = err instanceof ApiError ? err.errorCode : undefined;
-      if (code === "TASK-001") {
-        showInfo("안내", msg);
-      } else {
-        const errorType = code?.startsWith("ROBOT") ? "robot" : "task";
-        showAlert({ title: "알림", message: msg, errorCode: code ?? "TASK-013", errorType, source: "모니터링 > 작업 실행", description: (err instanceof ApiError ? err.description : undefined) ?? "handleStartAll — 작업 시작 API 호출 실패" });
-      }
-    }
-  };
-
-  const handleReturn = async (deviceId: string) => {
-    const robot = apiRobotsFull.find((r) => String(r.id) === deviceId);
-    if (!robot) return;
-    try {
-      await apiPost(`/api/tasks/return/${robot.id}`, {});
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "복귀에 실패했습니다.";
-      const code = err instanceof ApiError ? err.errorCode : undefined;
-      const errorType = code?.startsWith("ROBOT") ? "robot" : "task";
-      showAlert({ title: "알림", message: `${msg} (로봇: ${robot.name})`, errorCode: code ?? "ROBOT-007", errorType, source: "모니터링 > 복귀", description: (err instanceof ApiError ? err.description : undefined) ?? "handleReturn — 복귀 API 호출 실패" });
-    }
-  };
-
-  const handleStop = async (deviceId: string) => {
-    const robot = apiRobotsFull.find((r) => String(r.id) === deviceId);
-    if (!robot) return;
-    try {
-      await apiPost(`/api/tasks/stop/${robot.id}`, {});
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "정지 실패";
-      showAlert({ title: "로봇 정지 실패", message: `${msg} (로봇: ${robot.name})`, errorCode: "ROBOT-005", errorType: "robot", source: "모니터링 > 로봇 정지" });
-    }
-  };
-
-  const handleEmergencyStop = async () => {
-    try {
-      await apiPost("/api/convoy/force-stop", {});
-      setEmergencyStopped(true);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "비상정지 실패";
-      showAlert({ title: "비상정지", message: msg, errorCode: "ESTOP-001", errorType: "task", source: "모니터링 > 비상정지" });
-    }
-  };
-
-  const handleReturnAll = async () => {
-    try {
-      await apiPost("/api/convoy/return-all", {});
-      setEmergencyStopped(false);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "전체 복귀 실패";
-      showAlert({ title: "전체 복귀", message: msg, errorCode: "ESTOP-002", errorType: "task", source: "모니터링 > 전체 복귀" });
-    }
-  };
-
-  const handleStopAll = () => {
-    setStopConfirmOpen(true);
-  };
-
-  const handleConfirmStop = async () => {
-    setStopConfirmOpen(false);
-    try {
-      await apiPost("/api/convoy/stop");
-      setLoopStopping(true);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "작업 정지에 실패했습니다.";
-      const code = err instanceof ApiError ? err.errorCode : undefined;
-      if (msg.includes("실행 중인 작업이 없습니다") || msg.includes("Convoy가 실행 중이 아닙니다")) {
-        setLoopRunning(false); setLoopStopping(false); setIsRunning(false);
-      } else {
-        showAlert({ title: "알림", message: msg, errorCode: code ?? "TASK-009", errorType: "task", source: "모니터링 > 작업 정지", description: (err instanceof ApiError ? err.description : undefined) ?? "handleConfirmStop — 정지 API 호출 실패" });
-      }
-    }
-  };
-
-  // Convoy 상태 폴링 (3초 간격, 항상 실행 — 새로고침 후에도 상태 복원)
-  useEffect(() => {
-    const checkStatus = async () => {
-      try {
-        const res = await apiFetch<{ phase: string }>("/api/convoy/status");
-        if (!fireTestMode) {
-          setFireAlert(res.phase === "evacuating");
-        }
-        if (res.phase === "entering" || res.phase === "running") {
-          setLoopRunning(true);
-          setLoopStopping(false);
-          setIsRunning(true);
-        } else if (res.phase === "returning") {
-          setLoopRunning(true);
-          setLoopStopping(true);
-          setIsRunning(true);
-        } else {
-          setLoopRunning(false);
-          setLoopStopping(false);
-          setIsRunning(false);
-        }
-      } catch (err) {
-        console.error("[모니터링] 작업 상태 폴링 실패:", err);
-      }
-    };
-
-    checkStatus(); // 초기 로드 시 즉시 확인
-    const timer = setInterval(checkStatus, 3000);
-    return () => clearInterval(timer);
-  }, []);
 
   // ── API 로봇 → DeviceRow 형식 변환 ──
   const deviceList = useMemo(() => {
@@ -953,6 +854,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
         power,
         battery,
         status,
+        ip: robot.ip_address || "",
       };
     });
   }, [apiRobotsFull, liveByIp]);
@@ -1007,14 +909,6 @@ export function MonitoringClient({ initialDateTime }: Props) {
     };
   }, [openDeviceId, apiRobotsFull, liveByIp]);
 
-  const filteredTasks = mockTasks
-    .filter((task) => task.state === taskTab)
-    .filter((task) =>
-      taskSearch
-        ? task.robot.toLowerCase().includes(taskSearch.toLowerCase())
-        : true
-    );
-
   const showMapBackground =
     overlayItems.find((item) => item.label === "맵 배경")?.checked ?? true;
   const showNavigationLine =
@@ -1034,9 +928,6 @@ export function MonitoringClient({ initialDateTime }: Props) {
 
   return (
     <>
-      {fireAlert && <FireAlertOverlay />}
-      {emergencyStopped && !fireAlert && <EmergencyStopOverlay onReturnAll={() => setEmergencyStopped(false)} />}
-      {isLoading && <LoadingScreen pageName="모니터링" />}
       <div className="app-shell">
       <TopBar
         dateTime={currentDateTime}
@@ -1050,7 +941,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
           onClose={() => setNavCollapsed(true)}
           onItemSelect={handleNavItemSelect}
         />
-        <main className="main-content">
+        <main className="main-content" style={{ display: "flex" }}>
           <Panel
             title="로봇 관리"
             collapsed={leftCollapsed}
@@ -1085,42 +976,71 @@ export function MonitoringClient({ initialDateTime }: Props) {
               </>
             }
           >
-            <div className="device-list">
-              <div className="device-row__header">
-                <span className="device-row__header-cell">로봇 명</span>
-                <span className="device-row__header-cell">전원</span>
-                <span className="device-row__header-cell">배터리</span>
-                <span className="device-row__header-cell">상태</span>
+            <div className="left-panel-split">
+              <div className="left-panel-split__top">
+                <div className="device-list">
+                  <div className="device-row__header">
+                    <span className="device-row__header-cell">로봇 명</span>
+                    <span className="device-row__header-cell">전원</span>
+                    <span className="device-row__header-cell">배터리</span>
+                    <span className="device-row__header-cell">상태</span>
+                  </div>
+                  {filteredDevices.length === 0 ? (
+                    <div className="device-list__empty">등록된 로봇이 없습니다.</div>
+                  ) : (
+                    <>
+                      {filteredDevices
+                        .slice((devicePage - 1) * DEVICE_PAGE_SIZE, devicePage * DEVICE_PAGE_SIZE)
+                        .map((device) => (
+                          <DeviceRow
+                            key={device.id}
+                            id={device.id}
+                            name={device.name}
+                            power={device.power}
+                            battery={device.battery}
+                            status={device.status}
+                            ip={device.ip}
+                            isExpanded={expandedDeviceId === device.id}
+                            onToggleExpand={handleDeviceToggle}
+                            onInfo={setOpenDeviceId}
+                            onRemote={(id: string, ip: string) => setRemoteTarget({ id, name: device.name, ip })}
+                          />
+                        ))}
+                      {filteredDevices.length > DEVICE_PAGE_SIZE && (
+                        <div className="device-list__pagination">
+                          {Array.from(
+                            { length: Math.ceil(filteredDevices.length / DEVICE_PAGE_SIZE) },
+                            (_, i) => i + 1
+                          ).map((num) => (
+                            <button
+                              key={num}
+                              className={`device-list__page-btn ${num === devicePage ? "device-list__page-btn--active" : ""}`}
+                              onClick={() => setDevicePage(num)}
+                            >
+                              {num}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
-              {filteredDevices.length === 0 ? (
-                <div className="device-list__empty">등록된 로봇이 없습니다.</div>
-              ) : (
-                filteredDevices.map((device) => (
-                  <DeviceRow
-                    key={device.id}
-                    id={device.id}
-                    name={device.name}
-                    power={device.power}
-                    battery={device.battery}
-                    status={device.status}
-                    isExpanded={expandedDeviceId === device.id}
-                    onToggleExpand={handleDeviceToggle}
-                    onInfo={setOpenDeviceId}
-                    onReturn={handleReturn}
-                    onStop={handleStop}
-                  />
-                ))
-              )}
+              <div className="left-panel-split__divider" />
+              <div className="left-panel-split__bottom">
+                <JackTestPanel
+                  liveRobots={liveRobots}
+                />
+              </div>
             </div>
           </Panel>
 
           <div
             className="monitoring-stage"
-            style={
-              leftCollapsed
-                ? ({ "--overlay-anchor-left": "calc(2% + 40px + var(--overlay-devices-gap))" } as CSSProperties)
-                : undefined
-            }
+            style={{
+              flex: 1,
+              minWidth: 0,
+            }}
           >
             <section className={mapMode === "3d" ? "monitoring-map is-3d" : "monitoring-map"}>
               <BusinessSelectBox
@@ -1128,54 +1048,11 @@ export function MonitoringClient({ initialDateTime }: Props) {
                 selectedId={`${selectedBusiness}:${selectedArea}`}
                 onChange={handleBusinessAreaChange}
               />
-              <button
-                type="button"
-                className="estop-btn"
-                onClick={handleEmergencyStop}
-                title="비상정지 — 모든 로봇 즉시 정지"
-              >
-                <svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-                  {/* 광선 - 위 */}
-                  <line x1="32" y1="21" x2="32" y2="11" stroke="#ffcc00" strokeWidth="3" strokeLinecap="round"/>
-                  {/* 광선 - 왼쪽 위 */}
-                  <line x1="17" y1="27" x2="9" y2="19" stroke="#ffcc00" strokeWidth="3" strokeLinecap="round"/>
-                  {/* 광선 - 오른쪽 위 */}
-                  <line x1="47" y1="27" x2="55" y2="19" stroke="#ffcc00" strokeWidth="3" strokeLinecap="round"/>
-                  {/* 광선 - 왼쪽 */}
-                  <line x1="11" y1="38" x2="3" y2="38" stroke="#ffcc00" strokeWidth="3" strokeLinecap="round"/>
-                  {/* 광선 - 오른쪽 */}
-                  <line x1="53" y1="38" x2="61" y2="38" stroke="#ffcc00" strokeWidth="3" strokeLinecap="round"/>
-                  {/* 베이스 */}
-                  <rect x="14" y="48" width="36" height="9" rx="3" fill="#9aa3b2"/>
-                  {/* 돔 — A rx ry x-rot large-arc sweep ex ey */}
-                  <path d="M 14 48 A 18 22 0 0 1 50 48 Z" fill="#ff4444"/>
-                  {/* 돔 하이라이트 */}
-                  <path d="M 20 45 C 20 34 28 30 33 31" stroke="white" strokeWidth="2.5" strokeLinecap="round" fill="none" opacity="0.5"/>
-                </svg>
-              </button>
-              {emergencyStopped && (
-                <button
-                  type="button"
-                  className="return-all-btn"
-                  onClick={handleReturnAll}
-                  title="비상정지 후 모든 로봇을 충전소/대기지점으로 순차 복귀"
-                >
-                  전체 복귀
-                </button>
-              )}
-              {/* 화재 경보 테스트 버튼 */}
-              <button
-                type="button"
-                className="fire-test-btn"
-                onClick={() => {
-                  setFireTestMode((v) => !v);
-                  setFireAlert((v) => !v);
-                }}
-                title="화재 경보 오버레이 테스트"
-              >
-                🔥 화재 테스트
-              </button>
-              {!selectedArea && !isLoading ? (
+              {isLoading ? (
+                <div className="monitoring-map__loading">
+                  <div className="spinner" />
+                </div>
+              ) : !selectedArea ? (
                 <div className="monitoring-map__empty">
                   <p>현재 사업장에 등록된 영역이 없습니다.</p>
                 </div>
@@ -1187,7 +1064,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
                   routeWaypoints={routeWaypoints}
                   routeSegments={routeSegments}
                   robots={simulatedRobots}
-                  virtualWalls={mockVirtualWalls}
+                  virtualWalls={[]}
                   showMapBackground={showMapBackground}
                   showNavigationLine={showNavigationLine}
                   showDirectionArrows={showDirectionArrows}
@@ -1203,7 +1080,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
                   routeWaypoints={routeWaypoints}
                   routeSegments={routeSegments}
                   robots={simulatedRobots}
-                  virtualWalls={mockVirtualWalls}
+                  virtualWalls={[]}
 
                   showMapBackground={showMapBackground}
                   showNavigationLine={showNavigationLine}
@@ -1211,6 +1088,19 @@ export function MonitoringClient({ initialDateTime }: Props) {
                   showVirtualWalls={showVirtualWalls}
                   showNavigationNodes={showNavigationNodes}
                   showPoiMarkers={showPoiMarkers}
+                  robotTargets={(() => {
+                    if (!mapMeta || !mapImageSize || robotTargets.size === 0) return undefined;
+                    const converted = new Map<string, { x: number; y: number }>();
+                    robotTargets.forEach((target, sn) => {
+                      if (target) {
+                        converted.set(sn, {
+                          x: (target.x - mapMeta!.grid_origin_x) / mapMeta!.grid_resolution,
+                          y: mapImageSize!.h - (target.y - mapMeta!.grid_origin_y) / mapMeta!.grid_resolution,
+                        });
+                      }
+                    });
+                    return converted;
+                  })()}
                 />
               )}
             </section>
@@ -1234,88 +1124,18 @@ export function MonitoringClient({ initialDateTime }: Props) {
             </div>
           </div>
 
+          {/* 오른쪽 작업 현황 패널 */}
           <Panel
-            title="작업"
+            title="작업 현황"
             collapsed={rightCollapsed}
             collapsedTogglePosition="start"
-            onToggle={() => setRightCollapsed((value) => !value)}
+            onToggle={() => setRightCollapsed((v) => !v)}
             toggleIcon="left"
-            noBodyWrapper
             className="panel--overlay panel--overlay-right"
-            // headerActions={<button className="btn btn--primary" onClick={() => setCreateTaskOpen(true)}>Add Task</button>}
-            footer={
-              <div className="task-panel__footer-actions">
-                <button
-                  className="btn btn--primary"
-                  onClick={handleStartAll}
-                  disabled={loopRunning || loopStopping}
-                >
-                  {loopRunning || loopStopping ? "작업중" : "시작"}
-                </button>
-                <button
-                  className="btn btn--danger"
-                  onClick={handleStopAll}
-                  disabled={!isRunning || loopStopping}
-                >
-                  {loopStopping ? "종료중..." : "종료"}
-                </button>
-              </div>
-            }
-            // subheader={
-            //   <>
-            //     <div className="tab-row">
-            //       <button
-            //         className={taskTab === "running" ? "tab tab--active" : "tab"}
-            //         onClick={() => { setTaskTab("running"); setTaskSearch(""); setExpandedTaskId(null); }}
-            //       >
-            //         Running
-            //       </button>
-            //       <button
-            //         className={taskTab === "completed" ? "tab tab--active" : "tab"}
-            //         onClick={() => { setTaskTab("completed"); setTaskSearch(""); setExpandedTaskId(null); }}
-            //       >
-            //         Completed
-            //       </button>
-            //       <button
-            //         className={taskTab === "error" ? "tab tab--active" : "tab"}
-            //         onClick={() => { setTaskTab("error"); setTaskSearch(""); setExpandedTaskId(null); }}
-            //       >
-            //         Error
-            //       </button>
-            //     </div>
-            //     <SearchInput
-            //       key={taskTab}
-            //       placeholder="로봇명을 입력하세요."
-            //       onSearch={setTaskSearch}
-            //     />
-            //   </>
-            // }
           >
-            {/* <div className="task-list">
-              <div className="task-row__header">
-                <span className="task-row__header-cell">Robot</span>
-                <span className="task-row__header-cell">EndPoint</span>
-                <span className="task-row__header-cell">State</span>
-                <span className="task-row__header-cell">DurTime</span>
-              </div>
-              {filteredTasks.length === 0 ? (
-                <div className="task-row__empty">No tasks</div>
-              ) : (
-                filteredTasks.map((task) => (
-                  <TaskRow
-                    key={task.taskNum}
-                    robot={task.robot}
-                    endpoint={task.endpoint}
-                    state={task.state}
-                    duration={task.duration}
-                    isExpanded={expandedTaskId === task.taskNum}
-                    onToggleExpand={() => handleTaskToggle(task.taskNum)}
-                    onInfo={() => setOpenTaskId(task.taskNum)}
-                  />
-                ))
-              )}
-            </div> */}
+            <JobStatusPanel />
           </Panel>
+
           {selectedDevice && (
             <RobotDeviceInfo
               device={selectedDevice}
@@ -1326,21 +1146,13 @@ export function MonitoringClient({ initialDateTime }: Props) {
               readOnly
             />
           )}
-          <TaskInfoModal
-            taskId={openTaskId}
-            onClose={() => setOpenTaskId(null)}
-          />
-          <CreateTaskModal
-            open={createTaskOpen}
-            onClose={() => setCreateTaskOpen(false)}
-          />
-          <ConfirmModal
-            open={stopConfirmOpen}
-            title="작업 종료"
-            message={"현재 진행 중인 작업을 마친 후 종료됩니다.\n종료하시겠습니까?"}
-            onConfirm={handleConfirmStop}
-            onCancel={() => setStopConfirmOpen(false)}
-          />
+          {remoteTarget && (
+            <RemoteControlModal
+              robotName={remoteTarget.name}
+              robotIp={remoteTarget.ip}
+              onClose={() => setRemoteTarget(null)}
+            />
+          )}
         </main>
       </div>
     </div>

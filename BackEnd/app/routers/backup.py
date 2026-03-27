@@ -5,7 +5,6 @@ import subprocess
 import zipfile
 from datetime import datetime
 
-import openpyxl
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -13,8 +12,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME, get_db
-from app.models.activity_log import ActivityLog
-from app.models.system_log import SystemLog
 
 logger = logging.getLogger(__name__)
 
@@ -92,43 +89,6 @@ def _build_sql_python(db: Session) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def _build_excel(db: Session) -> bytes:
-    """DB의 모든 테이블을 각각 시트(탭)로 담아 Excel bytes 반환."""
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)  # 기본 빈 시트 제거
-
-    tables = [r[0] for r in db.execute(text("SHOW TABLES")).fetchall()]
-
-    for table in tables:
-        ws = wb.create_sheet(title=table[:31])  # 시트명 최대 31자
-
-        # 컬럼 헤더
-        result = db.execute(text(f"SELECT * FROM `{table}` LIMIT 0"))
-        col_names = list(result.keys())
-        ws.append(col_names)
-
-        # 데이터 행
-        rows = db.execute(text(f"SELECT * FROM `{table}`")).fetchall()
-        for row in rows:
-            values = []
-            for v in row:
-                if isinstance(v, datetime):
-                    values.append(v.strftime("%Y-%m-%d %H:%M:%S"))
-                elif isinstance(v, bytes):
-                    values.append(v.decode("utf-8", errors="replace"))
-                elif v is None:
-                    values.append("")
-                else:
-                    # TEXT 컬럼 길이 제한 (Excel 셀 최대 32767자)
-                    s = str(v)
-                    values.append(s[:32767] if len(s) > 32767 else s)
-            ws.append(values)
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
 @router.get("/db")
 def api_backup_db(db: Session = Depends(get_db)):
     """DB SQL 백업 — mysqldump 우선, 없으면 Python 방식으로 생성"""
@@ -168,12 +128,12 @@ def api_browse(path: str = "/"):
 
 
 class SaveRequest(BaseModel):
-    save_path: str  # 서버 측 저장 경로 (디렉터리 또는 파일 전체 경로)
+    save_path: str  # 서버 측 저장 경로 (디렉터리)
 
 
 @router.post("/save")
 def api_backup_save(body: SaveRequest, db: Session = Depends(get_db)):
-    """DB 백업 파일(SQL + Excel)을 서버 로컬 경로에 저장"""
+    """DB 백업 SQL 파일을 서버 로컬 경로에 저장"""
     save_path = body.save_path.strip()
     if not save_path:
         raise HTTPException(status_code=400, detail="저장 경로를 입력해주세요.")
@@ -181,15 +141,12 @@ def api_backup_save(body: SaveRequest, db: Session = Depends(get_db)):
     now = datetime.now()
     date_str = now.strftime("%Y%m%d_%H%M%S")
 
-    # 항상 디렉터리로 처리 (파일명은 자동 생성)
     dir_path = save_path if save_path.endswith(("/", "\\")) else save_path
     if not os.path.isdir(dir_path):
         os.makedirs(dir_path, exist_ok=True)
 
     sql_path = os.path.join(dir_path, f"db_backup_{date_str}.sql")
-    xlsx_path = os.path.join(dir_path, f"db_backup_{date_str}.xlsx")
 
-    # SQL 저장
     sql_bytes, err = _run_mysqldump()
     if sql_bytes is None:
         logger.warning(f"[backup/save] mysqldump 실패 ({err}) — Python 방식으로 대체")
@@ -200,60 +157,8 @@ def api_backup_save(body: SaveRequest, db: Session = Depends(get_db)):
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"SQL 파일 저장 실패: {e}")
 
-    # Excel 저장
-    try:
-        excel_bytes = _build_excel(db)
-        with open(xlsx_path, "wb") as f:
-            f.write(excel_bytes)
-    except OSError as e:
-        raise HTTPException(status_code=500, detail=f"Excel 파일 저장 실패: {e}")
-
-    logger.warning(f"[backup/save] 저장 완료: {sql_path}, {xlsx_path}")
+    logger.warning(f"[backup/save] 저장 완료: {sql_path}")
     return {
         "sql_path": sql_path,
-        "xlsx_path": xlsx_path,
         "sql_size": len(sql_bytes),
-        "xlsx_size": len(excel_bytes),
     }
-
-
-@router.get("/full")
-def api_backup_full(db: Session = Depends(get_db)):
-    """DB 전체 백업 — SQL 파일 + 로그 Excel을 ZIP으로 묶어 다운로드"""
-    now = datetime.now()
-    date_str = now.strftime("%Y%m%d_%H%M%S")
-    zip_filename = f"backup_{date_str}.zip"
-
-    # ── SQL 덤프 (mysqldump → 없으면 Python 방식) ───────────────────────────
-    sql_bytes, err = _run_mysqldump()
-    if sql_bytes is None:
-        logger.warning(f"[backup/full] mysqldump 실패 ({err}) — Python 방식으로 대체")
-        try:
-            sql_bytes = _build_sql_python(db)
-        except Exception as e:
-            logger.error(f"[backup/full] Python SQL 생성 실패: {e}")
-            sql_bytes = None
-
-    # ── Excel 빌드 ──────────────────────────────────────────────────────────
-    try:
-        excel_bytes = _build_excel(db)
-    except Exception as e:
-        logger.error(f"[backup/full] Excel 생성 실패: {e}")
-        excel_bytes = None
-
-    # ── ZIP 패키징 ──────────────────────────────────────────────────────────
-    zip_buf = io.BytesIO()
-    with zipfile.ZipFile(zip_buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        if sql_bytes:
-            zf.writestr(f"db_backup_{date_str}.sql", sql_bytes)
-        if excel_bytes:
-            zf.writestr(f"db_backup_{date_str}.xlsx", excel_bytes)
-
-    zip_content = zip_buf.getvalue()
-    logger.info(f"[backup/full] ZIP 백업 완료: {zip_filename} ({len(zip_content)} bytes)")
-
-    return Response(
-        content=zip_content,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
-    )

@@ -42,6 +42,8 @@ export function RobotDeviceInfo({
   const [initialStandbyId, setInitialStandbyId] = useState<number | null>(null);
   const [standbyId, setStandbyId] = useState<number | null>(null);
   const [isApplying, setIsApplying] = useState(false);
+  const [robotSpeed, setRobotSpeed] = useState(1.2);
+  const [initialSpeed, setInitialSpeed] = useState(1.2);
   const [poiDropdownOpen, setPoiDropdownOpen] = useState(false);
   const [poiDropdownPos, setPoiDropdownPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const poiDropdownRef = useRef<HTMLDivElement>(null);
@@ -76,6 +78,18 @@ export function RobotDeviceInfo({
         setInitialStandbyId(null);
         setStandbyId(null);
       });
+
+    // 로봇 속도 조회
+    if (device.ip) {
+      fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/speed/${device.ip}`)
+        .then((r) => r.json())
+        .then((d) => {
+          const spd = d.max_forward_velocity ?? 1.2;
+          setRobotSpeed(spd);
+          setInitialSpeed(spd);
+        })
+        .catch(() => {});
+    }
 
     return () => controller.abort();
   }, [device]);
@@ -155,8 +169,18 @@ export function RobotDeviceInfo({
         setInitialChargingId(data.charging_id ?? null);
         setInitialStandbyId(data.standby_id ?? null);
       } else {
-        console.error("[로봇 상세] 충전 설정 저장 실패:", res.status);
         showAlert({ title: "알림", message: "충전 설정 저장에 실패했습니다.", errorCode: "ROBOT-009", errorType: "robot", source: "로봇 상세 > 충전 설정", description: "RobotDeviceInfo — 충전 설정 저장 실패", robotSn: device.sn });
+      }
+      // 속도 변경
+      if (device.ip && robotSpeed !== initialSpeed) {
+        try {
+          await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/speed/${device.ip}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ max_forward_velocity: robotSpeed }),
+          });
+          setInitialSpeed(robotSpeed);
+        } catch {}
       }
     } catch (err) {
       console.error("[로봇 상세] 충전 설정 저장 오류:", err);
@@ -172,7 +196,8 @@ export function RobotDeviceInfo({
   const isChanged =
     (initialMinBattery !== null && minBattery !== initialMinBattery) ||
     (showChargingStation && chargingId !== initialChargingId) ||
-    standbyId !== initialStandbyId;
+    standbyId !== initialStandbyId ||
+    robotSpeed !== initialSpeed;
 
   const shouldScrollTaskTable = device.currentTask.length > 5;
 
@@ -239,7 +264,7 @@ export function RobotDeviceInfo({
             <div className="robot-info__field">
               <span className="robot-info__label">고객사</span>
               <span className="robot-info__value">
-                현대 글로비스
+                UND
               </span>
             </div>
             <div className="robot-info__field">
@@ -295,6 +320,24 @@ export function RobotDeviceInfo({
               }}
             />
             <span className="robot-info__range-value">{minBattery}%</span>
+          </div>
+
+          <div className="robot-info__battery-row">
+            <span className="robot-info__label">최대 속도</span>
+            <input
+              type="range"
+              className="robot-info__range"
+              min={0.5}
+              max={2.0}
+              step={0.1}
+              value={robotSpeed}
+              onChange={(e) => !readOnly && setRobotSpeed(Number(e.target.value))}
+              disabled={readOnly}
+              style={{
+                background: `linear-gradient(to right, var(--color-info) ${((robotSpeed - 0.5) / 1.5) * 100}%, var(--bg-surface-2) ${((robotSpeed - 0.5) / 1.5) * 100}%)`,
+              }}
+            />
+            <span className="robot-info__range-value">{robotSpeed.toFixed(1)} m/s</span>
           </div>
 
           {showChargingStation && (() => {

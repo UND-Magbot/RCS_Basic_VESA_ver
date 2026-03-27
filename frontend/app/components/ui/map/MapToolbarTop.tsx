@@ -5,7 +5,6 @@ import type { MapToolbarTopProps } from "@/lib/types/map";
 const toolbarItems = [
   { key: "undo", icon: "↩", label: "되돌리기" },
   { key: "charging", icon: "⚡", label: "충전소 생성" },
-  { key: "firewall", icon: "🔥", label: "방화벽 생성" },
   { key: "location", icon: "◎", label: "현 위치에서 포인트 생성" },
 ];
 
@@ -15,6 +14,7 @@ export function MapToolbarTop({
   isFullscreen,
   onChargingPile,
   onCurrentPos,
+  onCurrentPosJack,
   onFirewall,
 }: MapToolbarTopProps) {
   const handleClick = (key: string) => {

@@ -30,6 +30,7 @@ export function MapCanvas({
   onZoomChange,
   onOffsetChange,
   onImageLoad,
+  vwTempPoints = [],
 }: MapCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const isPanningRef = useRef(false);
@@ -37,6 +38,7 @@ export function MapCanvas({
   const offsetStartRef = useRef({ x: 0, y: 0 });
   const mousePosRef = useRef<{ x: number; y: number } | null>(null);
   const [mousePos, setMousePos] = useState<{ x: number; y: number } | null>(null);
+  const [vwMousePos, setVwMousePos] = useState<{ x: number; y: number } | null>(null);
 
   // lineStartPOI 해제 시 mousePos 초기화
   useEffect(() => {
@@ -134,6 +136,11 @@ export function MapCanvas({
     const pos = screenToCanvas(e.clientX, e.clientY);
     mousePosRef.current = pos;
 
+    // 가상벽 점 찍는 중이면 마우스 위치 갱신 (프리뷰용)
+    if (activeTool === "virtualwall" && vwTempPoints.length > 0) {
+      setVwMousePos(pos);
+    }
+
     // 라인 그리기 중이면 마우스 위치를 state에 갱신 (임시 라인 렌더용)
     if (lineStartPOI && (activeTool === "line" || activeTool === "curveLine")) {
       setMousePos(pos);
@@ -175,10 +182,12 @@ export function MapCanvas({
 
     if (
       activeTool === "point" ||
+      activeTool === "jackPoint" ||
       activeTool === "line" ||
       activeTool === "curveLine" ||
       activeTool === "polygon" ||
-      activeTool === "firewall"
+      activeTool === "firewall" ||
+      activeTool === "virtualwall"
     ) {
       const pos = screenToCanvas(e.clientX, e.clientY);
       onCanvasClick(pos.x, pos.y);
@@ -189,6 +198,7 @@ export function MapCanvas({
     if (isPanningRef.current) return "map-canvas-area__svg--panning";
     switch (activeTool) {
       case "point":
+      case "jackPoint":
         return "map-canvas-area__svg--point";
       case "line":
       case "curveLine":
@@ -265,13 +275,41 @@ export function MapCanvas({
             <polygon
               key={poly.id}
               points={poly.points.map((p) => `${p.x},${p.y}`).join(" ")}
-              className="map-polygon__shape"
+              className={poly.shapeType === "firewall" ? "map-polygon__firewall" : "map-polygon__shape"}
               onClick={(e) => {
                 e.stopPropagation();
                 onPolygonClick(poly.id);
               }}
             />
           ))}
+
+          {/* 가상벽 점 찍기 프리뷰 */}
+          {vwTempPoints.length > 0 && (
+            <g>
+              {/* 찍은 점들 사이 선 */}
+              <polyline
+                points={[
+                  ...vwTempPoints.map((p) => `${p.x},${p.y}`),
+                  ...(vwMousePos ? [`${vwMousePos.x},${vwMousePos.y}`] : []),
+                ].join(" ")}
+                className="map-polygon__firewall--preview"
+                fill="none"
+              />
+              {/* 4점째면 닫히는 선 프리뷰 */}
+              {vwTempPoints.length === 3 && vwMousePos && (
+                <line
+                  x1={vwMousePos.x} y1={vwMousePos.y}
+                  x2={vwTempPoints[0].x} y2={vwTempPoints[0].y}
+                  className="map-polygon__firewall--preview"
+                />
+              )}
+              {/* 찍은 점 표시 */}
+              {vwTempPoints.map((p, i) => (
+                <circle key={i} cx={p.x} cy={p.y} r={4 / zoom}
+                  fill="#ff3c3c" stroke="#fff" strokeWidth={1 / zoom} />
+              ))}
+            </g>
+          )}
 
           {/* Lines */}
           {lines.map((line) => {
@@ -378,6 +416,44 @@ export function MapCanvas({
                     className={circleClass}
                     strokeWidth={1}
                   />
+                ) : poi.type === "jack" ? (
+                  (() => {
+                    const res = mapMeta?.grid_resolution || 0.05;
+                    const rackW = 0.66 / res;
+                    const rackD = 0.70 / res;
+                    const angle = poi.angle != null ? -poi.angle * (180 / Math.PI) + 90 : 0;
+                    return (
+                      <g transform={`translate(${poi.x}, ${poi.y}) rotate(${angle})`}>
+                        <rect
+                          x={-rackW / 2}
+                          y={-rackD / 2}
+                          width={rackW}
+                          height={rackD}
+                          fill="rgba(155, 89, 182, 0.25)"
+                          stroke={isSelected || isLineStart ? "#fff" : "#9b59b6"}
+                          strokeWidth={isSelected || isLineStart ? 1 : 0.6}
+                          rx={0.5}
+                        />
+                        {/* V자 쉐브론 방향 표시 */}
+                        <polyline
+                          points={`${-rackW * 0.3},${-rackD * 0.05} 0,${-rackD * 0.25} ${rackW * 0.3},${-rackD * 0.05}`}
+                          fill="none"
+                          stroke="rgba(255,255,255,0.6)"
+                          strokeWidth={0.5}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                        <polyline
+                          points={`${-rackW * 0.3},${rackD * 0.15} 0,${-rackD * 0.05} ${rackW * 0.3},${rackD * 0.15}`}
+                          fill="none"
+                          stroke="rgba(255,255,255,0.6)"
+                          strokeWidth={0.5}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </g>
+                    );
+                  })()
                 ) : (
                   <circle
                     cx={poi.x}
@@ -389,7 +465,7 @@ export function MapCanvas({
                 )}
                 <text
                   x={poi.x}
-                  y={poi.y - 6}
+                  y={poi.y - (poi.type === "jack" ? (0.70 / (mapMeta?.grid_resolution || 0.05)) / 2 + 3 : 6)}
                   className="map-poi__label"
                 >
                   {poi.name}

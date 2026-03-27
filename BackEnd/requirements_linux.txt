@@ -10,6 +10,7 @@
 #   PyQt5 관련 전부
 
 annotated-types==0.7.0
+APScheduler==3.10.4
 anyio==4.11.0
 attrs==25.4.0
 autobahn==24.4.2
@@ -36,6 +37,7 @@ fsspec==2025.7.0
 greenlet==3.3.0
 gTTS==2.5.4
 h11==0.16.0
+httpx==0.28.1
 httptools==0.7.1
 hyperlink==21.0.0
 idna==3.10
@@ -51,7 +53,6 @@ mysql-connector-python==9.6.0
 networkx==3.4.2
 numpy==1.23.5
 opencv-python-headless==4.6.0.66
-openpyxl==3.1.5
 packaging==25.0
 pandas==2.3.1
 passlib==1.7.4

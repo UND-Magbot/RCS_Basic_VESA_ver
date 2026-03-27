@@ -197,9 +197,6 @@
 
 .panel--overlay-right {
   right: 2%;
-  top: 50%;
-  bottom: auto;
-  transform: translateY(-50%);
 }
 
 .panel--overlay.panel--collapsed {

@@ -5,8 +5,8 @@ import type { POIEditPopupProps, POIType } from "@/lib/types/map";
 
 const poiTypes: { value: POIType; label: string }[] = [
   { value: "standby", label: "대기 지점" },
-  { value: "charging", label: "충전소" },
   { value: "waypoint", label: "경유지" },
+  { value: "jack", label: "작업 포인트" },
 ];
 
 export function POIEditPopup({

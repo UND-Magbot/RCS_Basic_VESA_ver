@@ -4,21 +4,22 @@ services:
       context: ./BackEnd
       dockerfile: Dockerfile
     ports:
-      - "8000:8000"
+      - "8002:8002"
     environment:
+      - TZ=Asia/Seoul
       - DB_HOST=host.docker.internal
       - DB_PORT=${DB_PORT:-3306}
-      - DB_USER=${DB_USER:-root}
-      - DB_PASSWORD=${DB_PASSWORD:-unde5466}
-      - DB_NAME=${DB_NAME:-rcs_db}
+      - DB_USER=${DB_USER:-administrator}
+      - DB_PASSWORD=${DB_PASSWORD:-qwer!@34}
+      - DB_NAME=${DB_NAME:-rcs_basic_db}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ./BackEnd/static:/app/static
-      - /home/und/app/backups:/home/und/app/backups
+      - /home/administrator:/home/administrator
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ping')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/ping')"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -28,9 +29,9 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.0.21:8002}
     ports:
-      - "3000:3000"
+      - "3002:3002"
     depends_on:
       backend:
         condition: service_healthy

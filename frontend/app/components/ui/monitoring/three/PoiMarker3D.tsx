@@ -15,11 +15,58 @@ type Props = {
 function PoiMarker3DInner({ poi, imgW, imgH }: Props) {
   const [x, , z] = mapPixelToWorld(poi.position, imgW, imgH);
   const isCharging = poi.type === "charging";
+  const isJack = poi.type === "jack";
   const renderKind = poi.renderKind ?? (isCharging ? "circle" : "triangle");
 
   return (
     <group position={[x, 0, z]}>
-      {renderKind === "circle" ? (
+      {isJack ? (
+        /* 잭킹 포인트: 보라색 박스 (실제 랙 크기) */
+        (() => {
+          const rw = poi.rackWidthPx ?? 13;
+          const rd = poi.rackDepthPx ?? 14;
+          const legH = rw * 0.8;
+          const legOff = 0.8;
+          return (
+            <group rotation={[0, (poi.angle ?? 0) + Math.PI / 2, 0]}>
+              {/* 랙 상판 */}
+              <mesh position={[0, legH, 0]}>
+                <boxGeometry args={[rw, 1.5, rd]} />
+                <meshStandardMaterial
+                  color="#a855f7"
+                  emissive="#a855f7"
+                  emissiveIntensity={0.3}
+                  metalness={0.4}
+                  roughness={0.6}
+                />
+              </mesh>
+              {/* 4개 다리 */}
+              {[
+                [-(rw/2 - legOff), -(rd/2 - legOff)],
+                [(rw/2 - legOff), -(rd/2 - legOff)],
+                [(rw/2 - legOff), (rd/2 - legOff)],
+                [-(rw/2 - legOff), (rd/2 - legOff)],
+              ].map(([lx, lz], i) => (
+                <mesh key={i} position={[lx, legH / 2, lz]}>
+                  <boxGeometry args={[1.2, legH, 1.2]} />
+                  <meshStandardMaterial
+                    color="#7c3aed"
+                    emissive="#7c3aed"
+                    emissiveIntensity={0.2}
+                    metalness={0.5}
+                    roughness={0.5}
+                  />
+                </mesh>
+              ))}
+              {/* 하단 가이드 */}
+              <mesh position={[0, 0.3, 0]}>
+                <boxGeometry args={[rw * 0.9, 0.4, rd * 0.9]} />
+                <meshStandardMaterial color="#a855f7" transparent opacity={0.25} />
+              </mesh>
+            </group>
+          );
+        })()
+      ) : renderKind === "circle" ? (
         <group rotation={[0, poi.angle ?? 0, 0]}>
           <group position={[3, 0, 0]}>
             <ChargingStation3D />
@@ -37,13 +84,13 @@ function PoiMarker3DInner({ poi, imgW, imgH }: Props) {
         </mesh>
       )}
 
-      {/* Angle direction indicator (충전/대기 지점 제외) */}
-      {poi.angle != null && poi.type !== "charging" && poi.type !== "workstation" && (
+      {/* Angle direction indicator (충전/대기/잭킹 지점 제외) */}
+      {poi.angle != null && poi.type !== "charging" && poi.type !== "workstation" && poi.type !== "jack" && (
         <AngleIndicator angle={poi.angle} />
       )}
 
       {/* Label */}
-      <Billboard position={[0, renderKind === "circle" ? 26 : 18, 0]}>
+      <Billboard position={[0, isJack ? (poi.rackWidthPx ?? 13) + 8 : renderKind === "circle" ? 26 : 18, 0]}>
         <Text fontSize={7} color="#ffffff" anchorY="bottom">
           {poi.label}
         </Text>

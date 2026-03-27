@@ -6,9 +6,7 @@ from datetime import datetime
 # ── 카테고리 상수 ──
 
 CATEGORY_MAP = {
-    "task": "작업",
     "map": "맵",
-    "convoy": "대열",
     "robot": "로봇",
     "system": "시스템",
 }

@@ -1,47 +1,79 @@
-from sqlalchemy import Column, Integer, String, Boolean, Float, DateTime, ForeignKey, Text
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
 from app.database import Base
 
 
-class Task(Base):
-    """작업 테이블
-    status 코드: 0=대기, 1=실행중, 2=완료, 3=정지, 4=에러
-    repeat_count: -1 = 무한반복, 0 이상 = 반복 횟수
-    """
-    __tablename__ = "tasks"
+class TaskRoute(Base):
+    """경로 — POI 순서를 미리 정의"""
+    __tablename__ = "task_routes"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(100), nullable=False)
-    description = Column(Text, nullable=True)
-    robot_id = Column(Integer, ForeignKey("robots.id", ondelete="CASCADE"), nullable=False, index=True)
-    repeat_count = Column(Integer, default=-1)        # -1 = 무한반복
-    current_loop = Column(Integer, default=0)         # 현재 반복 횟수
-    current_waypoint_order = Column(Integer, default=0)  # 현재 실행 중인 웨이포인트 순서
-    status = Column(Integer, default=0)               # 0=대기, 1=실행중, 2=완료, 3=정지, 4=에러
-    is_active = Column(Boolean, default=True)
+    name = Column(String(200), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    # 관계
-    robot = relationship("Robot", backref="tasks")
-    waypoints = relationship("TaskWaypoint", back_populates="task",
-                             order_by="TaskWaypoint.order", cascade="all, delete-orphan")
+    waypoints = relationship("TaskRouteWaypoint", back_populates="route",
+                             order_by="TaskRouteWaypoint.order", cascade="all, delete-orphan")
+    schedules = relationship("ScheduledTask", back_populates="route")
 
 
-class TaskWaypoint(Base):
-    """작업 웨이포인트(노드) 테이블 — 순서대로 방문할 좌표 목록"""
-    __tablename__ = "task_waypoints"
+class TaskRouteWaypoint(Base):
+    """경로 내 웨이포인트 (픽업/드롭오프/대기 등)"""
+    __tablename__ = "task_route_waypoints"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(Integer, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
-    order = Column(Integer, nullable=False)           # 방문 순서 (0부터 시작)
-    name = Column(String(100), nullable=True)         # 노드 이름 (POI 이름)
-    x = Column(Float, nullable=False)
-    y = Column(Float, nullable=False)
-    orientation = Column(Float, default=0.0)          # yaw (라디안)
-    wait_seconds = Column(Float, default=0.0)         # 도착 후 대기 시간(초)
+    route_id = Column(Integer, ForeignKey("task_routes.id", ondelete="CASCADE"), nullable=False)
+    poi_id = Column(Integer, ForeignKey("map_pois.id", ondelete="CASCADE"), nullable=False)
+    order = Column(Integer, nullable=False)
+    waypoint_type = Column(String(20), nullable=False)  # pickup / dropoff / standby
+    wait_sec = Column(Integer, nullable=False, default=0)
 
-    # 관계
-    task = relationship("Task", back_populates="waypoints")
+    route = relationship("TaskRoute", back_populates="waypoints")
+    poi = relationship("MapPOI")
+
+
+class ScheduledTask(Base):
+    """스케줄 작업"""
+    __tablename__ = "scheduled_tasks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False)
+    robot_id = Column(Integer, ForeignKey("robots.id", ondelete="CASCADE"), nullable=False)
+    route_id = Column(Integer, ForeignKey("task_routes.id", ondelete="CASCADE"), nullable=False)
+    start_time = Column(String(5), nullable=False)          # "HH:MM"
+    end_time = Column(String(5), nullable=True)             # "HH:MM"
+    repeat_type = Column(String(20), nullable=False, default="once")  # once / daily / weekly
+    repeat_days = Column(String(20), nullable=True)         # "1,2,3,4,5" (월~금)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_run_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    robot = relationship("Robot", foreign_keys=[robot_id])
+    route = relationship("TaskRoute", back_populates="schedules")
+    history = relationship("TaskHistory", back_populates="task", cascade="all, delete-orphan")
+
+
+class TaskHistory(Base):
+    """실행 이력"""
+    __tablename__ = "task_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(Integer, ForeignKey("scheduled_tasks.id", ondelete="SET NULL"), nullable=True)
+    task_name = Column(String(200), nullable=True)
+    route_name = Column(String(200), nullable=True)
+    robot_id = Column(Integer, nullable=False)
+    robot_name = Column(String(100), nullable=True)
+    pickup_poi_name = Column(String(100), nullable=True)
+    dropoff_poi_name = Column(String(100), nullable=True)
+    status = Column(String(20), nullable=False, default="running")
+    started_at = Column(DateTime, server_default=func.now(), nullable=False)
+    finished_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    task = relationship("ScheduledTask", back_populates="history")

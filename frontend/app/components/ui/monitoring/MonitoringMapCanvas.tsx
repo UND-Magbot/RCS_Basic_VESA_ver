@@ -29,6 +29,7 @@ type Props = {
   showVirtualWalls: boolean;
   showNavigationNodes: boolean;
   showPoiMarkers: boolean;
+  robotTargets?: Map<string, { x: number; y: number }>;
 };
 
 type View = { scale: number; offsetX: number; offsetY: number };
@@ -700,6 +701,58 @@ function drawPoiCircle(
   drawMarkerLabel(ctx, cx, cy + outerR + 4 * counterScale, label, "#ffffff", counterScale, 700);
 }
 
+function drawPoiBox(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  label: string,
+  counterScale: number,
+  angle?: number,
+  rackWidthPx?: number,
+  rackDepthPx?: number
+) {
+  const w = rackWidthPx ?? 16 * counterScale;
+  const d = rackDepthPx ?? 16 * counterScale;
+
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (angle != null) ctx.rotate(-angle + Math.PI / 2);
+
+  // 박스 외곽 (반투명 보라색)
+  ctx.fillStyle = "rgba(168, 85, 247, 0.25)";
+  ctx.strokeStyle = "#a855f7";
+  ctx.lineWidth = 1.5 * counterScale;
+  ctx.beginPath();
+  ctx.rect(-w / 2, -d / 2, w, d);
+  ctx.fill();
+  ctx.stroke();
+
+  // 4개 다리 (모서리)
+  const legSize = 2 * counterScale;
+  ctx.fillStyle = "#7c3aed";
+  for (const [lx, ly] of [[-w/2, -d/2], [w/2 - legSize, -d/2], [w/2 - legSize, d/2 - legSize], [-w/2, d/2 - legSize]]) {
+    ctx.fillRect(lx, ly, legSize, legSize);
+  }
+
+  // V자 쉐브론 방향 표시 (박스 안쪽 꽉 차게)
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
+  ctx.lineWidth = 1.5 * counterScale;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  const cw = w * 0.35;
+  const ch = d * 0.2;
+  for (const offset of [-ch, ch * 0.4]) {
+    ctx.beginPath();
+    ctx.moveTo(-cw, offset + ch);
+    ctx.lineTo(0, offset);
+    ctx.lineTo(cw, offset + ch);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+  drawMarkerLabel(ctx, cx, cy + d / 2 + 5 * counterScale, label, "#d8b4fe", counterScale, 700);
+}
+
 function drawPoiTriangle(
   ctx: CanvasRenderingContext2D,
   cx: number,
@@ -808,14 +861,16 @@ function drawPois(
       drawDockingRadius(ctx, p.cx, p.cy, poi.dockingRadius, bounds, counterScale);
     }
 
-    if (renderKind === "circle") {
+    if (poi.type === "jack") {
+      drawPoiBox(ctx, p.cx, p.cy, poi.label, counterScale, poi.angle, poi.rackWidthPx, poi.rackDepthPx);
+    } else if (renderKind === "circle") {
       drawPoiCircle(ctx, p.cx, p.cy, poi.label, counterScale);
     } else {
       drawPoiTriangle(ctx, p.cx, p.cy, poi.label, counterScale);
     }
 
-    // angle 방향 표시 (충전/대기 지점 제외)
-    if (poi.angle != null && poi.type !== "charging" && poi.type !== "workstation") {
+    // angle 방향 표시 (충전/대기/잭킹 지점 제외)
+    if (poi.angle != null && poi.type !== "charging" && poi.type !== "workstation" && poi.type !== "jack") {
       drawPoiAngleIndicator(ctx, p.cx, p.cy, poi.angle, counterScale);
     }
   }
@@ -842,6 +897,77 @@ function roundedRect(
   ctx.lineTo(x, y + r);
   ctx.arcTo(x, y, x + r, y, r);
   ctx.closePath();
+}
+
+const TRAJECTORY_COLORS = [
+  "#5a8ff5", // 파랑
+  "#f5b731", // 노랑
+  "#3de0a4", // 초록
+  "#f56565", // 빨강
+  "#a855f7", // 보라
+  "#36dfc8", // 민트
+  "#ff8c42", // 주황
+  "#e879f9", // 핑크
+];
+
+function drawRobotTargetLines(
+  ctx: CanvasRenderingContext2D,
+  targets: Map<string, { x: number; y: number }>,
+  robots: RobotMarkerData[],
+  bounds: MapBounds,
+  viewScale: number,
+) {
+  const counterScale = 1 / viewScale;
+  let colorIdx = 0;
+
+  targets.forEach((target, sn) => {
+    const robot = robots.find((r) => r.robotId === sn);
+    if (!robot) return;
+
+    const color = TRAJECTORY_COLORS[colorIdx % TRAJECTORY_COLORS.length];
+    colorIdx++;
+
+    const to = mapToCanvas(target.x, target.y, bounds);
+
+    // 펄스 링 1 (1.5초 주기)
+    const t = (Date.now() % 1500) / 1500;
+    const pulseR = (6 + t * 25) * counterScale;
+    ctx.beginPath();
+    ctx.arc(to.cx, to.cy, pulseR, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3 * counterScale;
+    ctx.globalAlpha = 0.9 * (1 - t);
+    ctx.stroke();
+
+    // 펄스 링 2 (위상 차이)
+    const t2 = ((Date.now() + 750) % 1500) / 1500;
+    const pulseR2 = (6 + t2 * 25) * counterScale;
+    ctx.beginPath();
+    ctx.arc(to.cx, to.cy, pulseR2, 0, Math.PI * 2);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3 * counterScale;
+    ctx.globalAlpha = 0.9 * (1 - t2);
+    ctx.stroke();
+
+    // 글로우 배경
+    ctx.globalAlpha = 0.4;
+    ctx.beginPath();
+    ctx.arc(to.cx, to.cy, 12 * counterScale, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+
+    // 중심 점
+    ctx.globalAlpha = 1.0;
+    ctx.beginPath();
+    ctx.arc(to.cx, to.cy, 5 * counterScale, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 2 * counterScale;
+    ctx.stroke();
+
+    ctx.globalAlpha = 1.0;
+  });
 }
 
 function drawRobot(
@@ -1030,6 +1156,7 @@ export function MonitoringMapCanvas({
   showVirtualWalls: showVirtualWallsFlag,
   showNavigationNodes,
   showPoiMarkers,
+  robotTargets,
 }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -1053,6 +1180,7 @@ export function MonitoringMapCanvas({
     showVirtualWalls: showVirtualWallsFlag,
     showNavigationNodes,
     showPoiMarkers,
+    robotTargets,
   });
   dataRef.current = {
     pois,
@@ -1067,6 +1195,7 @@ export function MonitoringMapCanvas({
     showVirtualWalls: showVirtualWallsFlag,
     showNavigationNodes,
     showPoiMarkers,
+    robotTargets,
   };
 
   // --- Image loading ---
@@ -1287,6 +1416,11 @@ export function MonitoringMapCanvas({
       // POI markers
       if (data.showPoiMarkers) {
         drawPois(ctx, data.pois, bounds, v.scale);
+      }
+
+      // Robot target lines (현재 위치 → 목적지)
+      if (data.robotTargets && data.robotTargets.size > 0) {
+        drawRobotTargetLines(ctx, data.robotTargets, data.robots, bounds, v.scale);
       }
 
       // Robot markers (always shown)

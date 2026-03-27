@@ -22,7 +22,7 @@ export function TopBar({ dateTime, onToggleNav, navExpanded }: TopBarProps) {
           </IconButton>
         ) : null}
       </div>
-      <h2 className="top-bar__center">현대 글로비스 RCS</h2>
+      <h2 className="top-bar__center">UND RCS</h2>
       <div className="top-bar__right">
         <span className="top-bar__datetime">{dateTime}</span>
         <AlarmPopover iconSrc="/icon/Icon_v2 (41).png" />

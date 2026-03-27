@@ -11,13 +11,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements_linux.txt .
-RUN pip install --no-cache-dir -r requirements_linux.txt
+RUN pip install --no-cache-dir --timeout=300 -r requirements_linux.txt
 
 COPY . .
 
 # static 디렉토리 생성 (맵 파일 마운트 대상)
 RUN mkdir -p /app/static/maps
 
-EXPOSE 8000
+EXPOSE 8002
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

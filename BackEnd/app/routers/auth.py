@@ -24,7 +24,7 @@ def login(data: LoginRequest, db: Session = Depends(get_db)):
     """
     user, role_code = authenticate_user(db, data.login_id, data.password)
     token = create_access_token(user.id, role_code)
-    log_activity("system", "user_login",
+    log_activity("user", "user_login",
                  f"사용자 '{data.login_id}' 로그인",
                  source="login")
 
@@ -95,7 +95,7 @@ def change_password(
     user.password_hash = bcrypt.hash(data.new_password)
     db.commit()
 
-    log_activity("system", "password_change",
+    log_activity("user", "password_change",
                  f"사용자 '{current_user.login_id}' 비밀번호 변경",
                  source="change_password")
 

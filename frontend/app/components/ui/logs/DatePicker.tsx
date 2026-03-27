@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { MonthYearPicker } from "../tasks/MonthYearPicker";
+import { MonthYearPicker } from "./MonthYearPicker";
 import type { DatePickerProps } from "@/lib/types/logs";
 import "./DatePicker.css";
 

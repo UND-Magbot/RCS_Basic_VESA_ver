@@ -1,0 +1,94 @@
+.my-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface-1);
+  border-radius: var(--radius-card);
+}
+
+.my-picker__body {
+  display: flex;
+  flex: 1;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  overflow: hidden;
+}
+
+.my-picker__months {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
+  align-content: start;
+  flex: 1;
+}
+
+.my-picker__month {
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-button);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: background var(--transition-base) var(--ease-default),
+    border-color var(--transition-base) var(--ease-default);
+}
+
+.my-picker__month:hover {
+  background: var(--bg-hover);
+}
+
+.my-picker__month--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.my-picker__years {
+  width: 72px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-right: var(--space-1);
+  scrollbar-width: thin;
+}
+
+.my-picker__year {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-button);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--transition-base) var(--ease-default);
+}
+
+.my-picker__year:hover {
+  background: var(--bg-hover);
+}
+
+.my-picker__year--active {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.my-picker__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border);
+}

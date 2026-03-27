@@ -25,7 +25,7 @@ def api_create_user(
 ):
     """DB-01 사용자 등록"""
     result = create_user(db, data)
-    log_activity("system", "user_create",
+    log_activity("user", "user_create",
                  f"[{current_user.login_id}] 사용자 등록: {data.login_id}",
                  source="api_create_user")
     return result
@@ -59,7 +59,7 @@ def api_update_user(
     result = update_user(db, user_id, data)
     user = get_user(db, user_id)
     user_display = user.login_id if user else f"ID {user_id}"
-    log_activity("system", "user_update",
+    log_activity("user", "user_update",
                  f"[{current_user.login_id}] 사용자 정보 수정: {user_display}",
                  source="api_update_user")
     return result
@@ -75,7 +75,7 @@ def api_delete_user(
     user = get_user(db, user_id)
     user_display = user.login_id if user else f"ID {user_id}"
     result = delete_user(db, user_id)
-    log_activity("system", "user_delete",
+    log_activity("user", "user_delete",
                  f"[{current_user.login_id}] 사용자 삭제: {user_display}",
                  source="api_delete_user")
     return result

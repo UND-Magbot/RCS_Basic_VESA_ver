@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useAlert } from "@/lib/context/AlertContext";
 import { apiFetch } from "@/lib/api";
 import { DirPickerModal } from "./DirPickerModal";
@@ -9,7 +9,17 @@ import "./DirPickerModal.css";
 
 export function DbBackupTab() {
   const { showInfo } = useAlert();
-  const [savePath, setSavePath] = useState("/home/und/app/backups/");
+  const STORAGE_KEY = "db_backup_path";
+  const [savePath, setSavePath] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem(STORAGE_KEY) || "/home/administrator/";
+    }
+    return "/home/administrator/";
+  });
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, savePath);
+  }, [savePath]);
   const [isSaving, setIsSaving] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
 
@@ -20,7 +30,7 @@ export function DbBackupTab() {
     }
     setIsSaving(true);
     try {
-      const res = await apiFetch<{ sql_path: string; xlsx_path: string }>(
+      const res = await apiFetch<{ sql_path: string }>(
         "/api/backup/save",
         {
           method: "POST",
@@ -28,7 +38,7 @@ export function DbBackupTab() {
           body: JSON.stringify({ save_path: savePath.trim() }),
         }
       );
-      showInfo("알림", `백업 완료\nSQL: ${res.sql_path}\nExcel: ${res.xlsx_path}`);
+      showInfo("알림", `백업 완료\nSQL: ${res.sql_path}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "DB 백업에 실패했습니다.";
       showInfo("알림", msg);

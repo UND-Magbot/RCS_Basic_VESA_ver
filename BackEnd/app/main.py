@@ -1,11 +1,11 @@
-import logging  # reload trigger
+import logging
 
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 
-# 로깅 설정 — 백그라운드 스레드 로그도 터미널에 출력
+# 로깅 설정
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
@@ -15,8 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.database import init_db
-from app.routers import user, robot, auth, map, task, alarm_log, convoy, activity_log, system_log, backup, log, acs, menu, permission
-from app.services.wcs_service import start_wcs_reporter, stop_wcs_reporter
+from app.routers import user, robot, auth, map, alarm_log, activity_log, backup, log, jack_test, task
+from app.services.scheduler import init_scheduler, shutdown_scheduler
 
 # 모델 import (테이블 메타데이터 등록용)
 import app.models  # noqa: F401
@@ -26,28 +26,9 @@ import app.models  # noqa: F401
 async def lifespan(application: FastAPI):
     # 서버 시작 시 DB + 테이블 자동 생성
     init_db()
-
-    # 시스템 로그 → DB 자동 저장
-    # uvicorn이 dictConfig로 로깅을 재설정하므로,
-    # lifespan 시점에 각 로거에 직접 핸들러를 등록해야 함
-    from app.log_handler import DBLogHandler
-    db_handler = DBLogHandler()
-    target_loggers = [
-        logging.getLogger(),              # 루트 (앱 코드)
-        logging.getLogger("uvicorn"),      # uvicorn 코어 (uvicorn.error가 여기로 전파됨)
-        logging.getLogger("uvicorn.access"),  # 접속 로그 (propagate=False라 별도 등록)
-    ]
-    for lgr in target_loggers:
-        lgr.addHandler(db_handler)
-
-    start_wcs_reporter()
-
+    init_scheduler()
     yield
-
-    stop_wcs_reporter()
-
-    for lgr in target_loggers:
-        lgr.removeHandler(db_handler)
+    shutdown_scheduler()
 
 
 app = FastAPI(
@@ -61,7 +42,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -70,16 +52,12 @@ app.include_router(auth.router)
 app.include_router(user.router)
 app.include_router(robot.router)
 app.include_router(map.router)
-app.include_router(task.router)
 app.include_router(alarm_log.router)
-app.include_router(convoy.router)
 app.include_router(activity_log.router)
-app.include_router(system_log.router)
 app.include_router(backup.router)
 app.include_router(log.router)
-app.include_router(acs.router)
-app.include_router(menu.router)
-app.include_router(permission.router)
+app.include_router(jack_test.router)
+app.include_router(task.router)
 
 
 # 정적 파일 서빙 (맵 이미지 등)
@@ -91,3 +69,23 @@ app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 @app.get("/ping")
 def ping():
     return {"message": "pong"}
+
+
+@app.get("/health")
+def health_check():
+    """헬스체크 — DB 연결 확인"""
+    from app.database import engine
+    from sqlalchemy import text as sa_text
+    import time
+
+    result = {"status": "ok", "timestamp": time.time(), "checks": {}}
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1"))
+        result["checks"]["database"] = "ok"
+    except Exception as e:
+        result["checks"]["database"] = f"error: {e}"
+        result["status"] = "degraded"
+
+    return result

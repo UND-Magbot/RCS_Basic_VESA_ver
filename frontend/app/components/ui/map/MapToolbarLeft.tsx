@@ -3,8 +3,9 @@
 import type { MapTool, MapToolbarLeftProps } from "@/lib/types/map";
 
 const tools: { key: MapTool; icon: string; label: string }[] = [
-  { key: "line", icon: "╱", label: "라인" },
   { key: "point", icon: "●", label: "포인트" },
+  { key: "jackPoint", icon: "⚑", label: "작업 포인트" },
+  { key: "virtualwall", icon: "▯", label: "가상벽" },
   { key: "del", icon: "✕", label: "삭제" },
 ];
 

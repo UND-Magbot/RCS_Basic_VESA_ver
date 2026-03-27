@@ -110,10 +110,21 @@ export function MapSyncModal({
           }),
         });
 
+        // overlay(충전소, 가상벽, rack area) 동기화
+        try {
+          await apiFetch(`/api/map/maps/${mapId}/sync-overlays`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ robot_ip: robot.ip_address }),
+          });
+        } catch {
+          // overlay 실패해도 맵 동기화는 성공
+        }
+
         setResults((prev) =>
           prev.map((r) =>
             r.sn === robot.sn
-              ? { ...r, status: "success" as const, message: "맵 업로드 + 지도 적용 완료" }
+              ? { ...r, status: "success" as const, message: "맵 업로드 + overlay 적용 완료" }
               : r
           )
         );

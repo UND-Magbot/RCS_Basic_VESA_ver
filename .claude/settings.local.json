@@ -15,7 +15,11 @@
       "Bash(curl -s --connect-timeout 3 -H \"Authorization: Secret 19a11878aaab420fba94577ce3620dce\" \"http://192.168.0.$ip:8090/chassis/battery\")",
       "Bash(curl -s \"http://192.168.10.209:8090/services/setup_wifi\" -X GET -H \"Secret: 19a11878aaab420fba94577ce3620dce\" -H \"Accept: text/html\")",
       "Bash(powershell -Command \"Get-NetRoute -AddressFamily IPv4 | Where-Object {$_DestinationPrefix -eq ''0.0.0.0/0''} | Select-Object InterfaceAlias, NextHop | Format-Table\")",
-      "Bash(route print)"
+      "Bash(route print)",
+      "Bash(python -m py_compile BackEnd/app/robot_api/robot_convoy_service.py)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(python -c \"from app.main import app; print\\(''OK''\\)\")",
+      "Bash(npm run:*)"
     ]
   }
 }

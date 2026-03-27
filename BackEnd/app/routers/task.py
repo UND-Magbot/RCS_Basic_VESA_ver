@@ -1,512 +1,606 @@
-from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+"""
+작업 관리 라우터
+- 경로(Route) CRUD
+- 스케줄 작업 CRUD + 즉시 실행
+- 실행 이력 조회
+"""
+import logging
+import threading
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models.robot import Robot
+from app.models.task import TaskRoute, TaskRouteWaypoint, ScheduledTask, TaskHistory
 from app.models.map import MapPOI
-from app.robot_api.robot_task_service import start_loop, stop_loop, get_loop_status, confirm_loop, send_charge, start_charge_route, start_return_route, cancel_current_move
-from app.robot_api.robot_live_service import _collect_ws_topics, _to_runstate
-from app.robot_api.route_utils import find_route
-from app.crud.activity_log import log_activity
+from app.models.robot import Robot
+from app.schemas.task import (
+    TaskRouteCreate, TaskRouteUpdate, TaskRouteResponse, WaypointResponse,
+    ScheduledTaskCreate, ScheduledTaskUpdate, ScheduledTaskResponse,
+    TaskHistoryResponse,
+)
+from app.services.scheduler import (
+    add_task_job_by_id, remove_task_job, get_next_run_time, execute_scheduled_task,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/tasks", tags=["작업 관리"])
 
 
-# ─── 요청 스키마 ───────────────────────────────────────────────────────────────
+# ══════════════════════════════════════
+# 경로(Route) CRUD
+# ══════════════════════════════════════
 
-class LoopStartRequest(BaseModel):
-    robot_id: int
-    poi_names: list[str] = Field(..., min_length=1, description="순서대로 방문할 POI 이름 목록")
-    stop_names: list[str] = Field(default=[], description="작업 포인트 (정지할 POI 이름). 비어있으면 모든 POI에서 정지")
-    entry_poi_names: list[str] = Field(default=[], description="진입 경로 POI (충전소→작업구역, 최초 1회만 통과)")
-
-
-# ─── 헬퍼 ─────────────────────────────────────────────────────────────────────
-
-def _get_robot_ip(db: Session, robot_id: int) -> str | JSONResponse:
-    robot = db.query(Robot).filter(Robot.id == robot_id, Robot.is_active == True).first()
-    if not robot:
-        return JSONResponse(status_code=404, content={"detail": "로봇을 찾지 못했습니다."})
-    if not robot.ip_address:
-        return JSONResponse(status_code=400, content={
-            "detail": "로봇 IP 주소가 등록되어 있지 않습니다.", "error_code": "ROBOT-003",
-            "description": "_get_robot_ip() — IP 미등록"
+def _route_to_response(route: TaskRoute) -> dict:
+    waypoints = []
+    for wp in route.waypoints:
+        poi = wp.poi
+        waypoints.append({
+            "id": wp.id,
+            "poi_id": wp.poi_id,
+            "poi_name": poi.name if poi else None,
+            "order": wp.order,
+            "waypoint_type": wp.waypoint_type,
+            "wait_sec": wp.wait_sec or 0,
+            "world_x": poi.world_x if poi else None,
+            "world_y": poi.world_y if poi else None,
         })
-    return robot.ip_address
-
-
-# ─── 엔드포인트 ────────────────────────────────────────────────────────────────
-
-@router.post("/loop/start")
-def api_start_loop(req: LoopStartRequest, db: Session = Depends(get_db)):
-    """무한반복 작업 시작
-    - poi_names: DB map_pois 테이블의 POI name 목록 (순서대로 방문)
-    - 예시: ["CUR-001", "CUR-002"]
-    """
-    ip = _get_robot_ip(db, req.robot_id)
-    if isinstance(ip, JSONResponse):
-        return ip
-
-    # is_running 체크는 start_loop 내부에서 처리 (정리 로직 포함)
-    ok, msg, code = start_loop(req.robot_id, ip, req.poi_names, req.stop_names, req.entry_poi_names)
-    if not ok:
-        desc_map = {"TASK-001": "start_loop() — 이미 작업 실행 중일 때", "TASK-002": "start_loop() — POI 없이 작업 시작"}
-        return JSONResponse(status_code=400, content={"detail": msg, "error_code": code, "description": desc_map.get(code, "")})
-
-    return {"message": msg, "robot_id": req.robot_id, "poi_names": req.poi_names, "stop_names": req.stop_names, "entry_poi_names": req.entry_poi_names}
-
-
-@router.post("/loop/stop/{robot_id}")
-def api_stop_loop(robot_id: int, db: Session = Depends(get_db)):
-    """무한반복 작업 정지"""
-    ip = _get_robot_ip(db, robot_id)
-    if isinstance(ip, JSONResponse):
-        return ip
-    ok, msg, code = stop_loop(robot_id, ip)
-    if not ok:
-        return JSONResponse(status_code=400, content={"detail": msg, "error_code": code, "description": "stop_loop() — 정지할 작업 없음"})
-
-    return {"message": msg, "robot_id": robot_id}
-
-
-@router.post("/loop/confirm/{robot_id}")
-def api_confirm_loop(robot_id: int):
-    """작업 포인트 확인 — 로봇 태블릿에서 호출하여 다음 구간으로 진행"""
-    ok, msg, code = confirm_loop(robot_id)
-    if not ok:
-        return JSONResponse(status_code=400, content={"detail": msg, "error_code": code, "description": "confirm_loop() — 확인 대기 없음"})
-    return {"message": msg, "robot_id": robot_id}
-
-
-@router.get("/loop/status/{robot_id}")
-def api_loop_status(robot_id: int, db: Session = Depends(get_db)):
-    """무한반복 작업 상태 조회 (idle일 때 실제 충전 상태 반영)"""
-    status = get_loop_status(robot_id)
-
-    if status.get("status") in ("idle", "stopped"):
-        robot = db.query(Robot).filter(Robot.id == robot_id, Robot.is_active == True).first()
-        if robot and robot.ip_address:
-            try:
-                ws_data, _ = _collect_ws_topics(robot.ip_address, ["/planning_state", "/detailed_battery_state", "/battery_state"], timeout_sec=3)
-                planning = ws_data.get("/planning_state", {})
-                battery = ws_data.get("/detailed_battery_state", {}) or ws_data.get("/battery_state", {})
-                runstate = _to_runstate(planning, battery, online=True)
-                if runstate == "CHARGING":
-                    status = {"status": "charging", "message": "충전 중"}
-            except Exception:
-                pass
-
-    return {"robot_id": robot_id, **status}
-
-
-class ChargeRequest(BaseModel):
-    route_poi_names: list[str] = Field(default=[], description="충전소까지 경유할 POI 이름 목록 (비어있으면 DB에서 자동 탐색)")
-
-
-def _find_charge_route(db: Session, robot_id: int) -> list[str]:
-    """로봇 충전소까지의 경유 경로를 DB MapLine 그래프에서 자동 탐색"""
-    robot = db.query(Robot).filter(Robot.id == robot_id).first()
-    if not robot or not robot.charging_id:
-        return []
-
-    charging_poi = db.query(MapPOI).filter(
-        MapPOI.id == robot.charging_id, MapPOI.is_active == True
-    ).first()
-    if not charging_poi:
-        return []
-
-    # 같은 맵의 WORK 노드 중 가장 가까운 것 → 충전소까지 경로 탐색
-    work_pois = db.query(MapPOI).filter(
-        MapPOI.map_id == charging_poi.map_id,
-        MapPOI.name.like("WORK%"),
-        MapPOI.is_active == True,
-    ).all()
-
-    if not work_pois:
-        return []
-
-    # 각 WORK 노드에서 충전소까지 경로 탐색, 가장 짧은 것 선택
-    best_route = None
-    for wp in work_pois:
-        route = find_route(db, charging_poi.map_id, wp.id, charging_poi.id,
-                           include_endpoints=False)
-        if route is not None and (best_route is None or len(route) < len(best_route)):
-            best_route = route
-
-    return best_route or []
-
-
-@router.post("/charge/{robot_id}")
-def api_charge(robot_id: int, req: ChargeRequest = None, db: Session = Depends(get_db)):
-    """로봇을 충전소로 이동 (경유 경로 미지정 시 DB에서 자동 탐색)"""
-    ip = _get_robot_ip(db, robot_id)
-    if isinstance(ip, JSONResponse):
-        return ip
-
-    route_names = []
-    if req and req.route_poi_names:
-        route_names = req.route_poi_names
-    else:
-        route_names = _find_charge_route(db, robot_id)
-
-    # 충전소 이름 조회 (charger_name으로 로봇 맵 overlay ID 자동 매칭)
-    charger_name = None
-    robot = db.query(Robot).filter(Robot.id == robot_id).first()
-    if robot and robot.charging_id:
-        cpoi = db.query(MapPOI).filter(MapPOI.id == robot.charging_id, MapPOI.is_active == True).first()
-        if cpoi:
-            charger_name = cpoi.name
-
-    if route_names:
-        ok, msg = start_charge_route(robot_id, ip, route_names, charger_name=charger_name)
-    else:
-        ok, msg = send_charge(ip, charger_name=charger_name)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    _rname = robot.name if robot else f"로봇 {robot_id}"
-    log_activity("robot", "robot_charge",
-                 f"로봇 '{_rname}' 충전소 이동 요청",
-                 robot_id=robot_id, robot_name=_rname, source="api_charge")
-    return {"message": msg, "robot_id": robot_id, "route": route_names}
-
-
-@router.post("/return/{robot_id}")
-def api_return(robot_id: int, db: Session = Depends(get_db)):
-    """로봇 복귀 — standby_id가 있으면 대기장소, 없으면 충전소로 이동"""
-    ip = _get_robot_ip(db, robot_id)
-    if isinstance(ip, JSONResponse):
-        return ip
-
-    robot = db.query(Robot).filter(Robot.id == robot_id).first()
-    if not robot:
-        raise HTTPException(status_code=404, detail="로봇을 찾지 못했습니다.")
-
-    dest_poi = None
-    dest_type = None
-
-    # 1) standby_id 우선
-    if robot.standby_id:
-        poi = db.query(MapPOI).filter(
-            MapPOI.id == robot.standby_id, MapPOI.is_active == True
-        ).first()
-        if poi:
-            dest_poi = poi
-            dest_type = "standby"
-
-    # 2) standby 없으면 charging_id
-    if not dest_poi and robot.charging_id:
-        poi = db.query(MapPOI).filter(
-            MapPOI.id == robot.charging_id, MapPOI.is_active == True
-        ).first()
-        if poi:
-            dest_poi = poi
-            dest_type = "charging"
-
-    if not dest_poi:
-        raise HTTPException(status_code=400, detail="대기장소/충전소가 설정되지 않았습니다.")
-
-    # 경유 경로 자동 탐색
-    route_names = _find_return_route(db, dest_poi)
-
-    # 목적지 POI를 경로 마지막에 포함
-    if route_names:
-        route_names.append(dest_poi.name)
-    else:
-        route_names = [dest_poi.name]
-
-    charger_name = dest_poi.name if dest_type == "charging" else None
-    ok, msg = start_return_route(robot_id, ip, route_names, dest_poi.name, charger_name=charger_name)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-
     return {
-        "message": msg,
-        "robot_id": robot_id,
-        "dest_type": dest_type,
-        "dest_name": dest_poi.name,
-        "route": route_names,
+        "id": route.id,
+        "name": route.name,
+        "waypoints": waypoints,
+        "is_active": route.is_active,
+        "created_at": route.created_at,
     }
 
 
-def _find_return_route(db: Session, dest_poi: MapPOI) -> list[str]:
-    """현재 로봇 위치(가장 가까운 WORK 노드)에서 목적지까지 경유 경로 탐색"""
-    work_pois = db.query(MapPOI).filter(
-        MapPOI.map_id == dest_poi.map_id,
-        MapPOI.name.like("WORK%"),
-        MapPOI.is_active == True,
-    ).all()
-
-    if not work_pois:
-        return []
-
-    best_route = None
-    for wp in work_pois:
-        route = find_route(db, dest_poi.map_id, wp.id, dest_poi.id,
-                           include_endpoints=False)
-        if route is not None and (best_route is None or len(route) < len(best_route)):
-            best_route = route
-
-    return best_route or []
+@router.get("/routes")
+def api_get_routes(
+    robot_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    query = db.query(TaskRoute).filter(TaskRoute.is_active == True)
+    if robot_id:
+        query = query.filter(TaskRoute.robot_id == robot_id)
+    routes = query.order_by(TaskRoute.id.desc()).all()
+    return {"total": len(routes), "items": [_route_to_response(r) for r in routes]}
 
 
-@router.post("/stop/{robot_id}")
-def api_stop_robot(robot_id: int, db: Session = Depends(get_db)):
-    """로봇 현재 이동 명령 즉시 취소 (루프 작업 포함)"""
-    ip = _get_robot_ip(db, robot_id)
-    if isinstance(ip, JSONResponse):
-        return ip
+@router.post("/routes", status_code=201)
+def api_create_route(data: TaskRouteCreate, db: Session = Depends(get_db)):
+    route = TaskRoute(name=data.name)
+    db.add(route)
+    db.flush()
 
-    # 루프 작업이 실행 중이면 루프도 정지
-    stop_loop(robot_id, ip)
+    for wp in data.waypoints:
+        poi = db.query(MapPOI).filter(MapPOI.id == wp.poi_id, MapPOI.is_active == True).first()
+        if not poi:
+            raise HTTPException(404, f"POI를 찾을 수 없습니다 (id={wp.poi_id})")
+        db.add(TaskRouteWaypoint(
+            route_id=route.id,
+            poi_id=wp.poi_id,
+            order=wp.order,
+            waypoint_type=wp.waypoint_type,
+            wait_sec=wp.wait_sec,
+        ))
 
-    # 현재 이동 취소
-    ok = cancel_current_move(ip)
-    if not ok:
-        raise HTTPException(status_code=400, detail="이동 취소 실패")
-    robot = db.query(Robot).filter(Robot.id == robot_id).first()
-    _rname = robot.name if robot else f"로봇 {robot_id}"
-    log_activity("robot", "robot_stop",
-                 f"로봇 '{_rname}' 이동 즉시 취소",
-                 robot_id=robot_id, robot_name=_rname, source="api_stop_robot")
-    return {"message": "이동이 취소되었습니다", "robot_id": robot_id}
+    db.commit()
+    db.refresh(route)
+    return _route_to_response(route)
 
 
-# ─── 로봇 태블릿용 확인 페이지 ──────────────────────────────────────────────────
+@router.get("/routes/{route_id}")
+def api_get_route(route_id: int, db: Session = Depends(get_db)):
+    route = db.query(TaskRoute).filter(TaskRoute.id == route_id).first()
+    if not route:
+        raise HTTPException(404, "경로를 찾을 수 없습니다")
+    return _route_to_response(route)
 
-@router.get("/tablet/{robot_id}", response_class=HTMLResponse)
-def tablet_page(robot_id: int):
-    """로봇 태블릿 브라우저에서 열 확인 페이지"""
-    return f"""<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-<title>로봇 {robot_id} 작업 확인</title>
-<style>
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:'Noto Sans KR',sans-serif; background:#1a1a2e; color:#fff;
-        display:flex; flex-direction:column; align-items:center; justify-content:center;
-        height:100vh; overflow:hidden; }}
-.status-box {{ text-align:center; width:90%; max-width:900px;
-               display:flex; flex-direction:column; align-items:center; gap:1.5vh; }}
-.poi-name {{ font-size:clamp(3rem,10vw,7rem); font-weight:800; line-height:1.2;
-             color:#e94560; word-break:keep-all; }}
-.status-text {{ font-size:clamp(1.6rem,5vw,3rem); line-height:1.4; color:#aaa;
-                word-break:keep-all; }}
-.loop-info {{ font-size:clamp(1.2rem,3.5vw,2rem); line-height:1.3; color:#666; }}
 
-#btn-confirm {{
-  display:none; width:80vw; max-width:560px; height:clamp(80px,18vh,160px);
-  font-size:clamp(2rem,6vw,3.5rem); font-weight:800; border:none; border-radius:24px;
-  background:linear-gradient(135deg,#e94560,#c23152); color:#fff;
-  cursor:pointer; box-shadow:0 12px 40px rgba(233,69,96,0.5);
-  transition:transform .1s,box-shadow .1s;
-  justify-content:center; align-items:center;
-  margin-top:1vh;
-}}
-#btn-confirm:active {{
-  transform:scale(0.95);
-  box-shadow:0 6px 20px rgba(233,69,96,0.3);
-}}
-#btn-confirm.show {{ display:flex; }}
+@router.put("/routes/{route_id}")
+def api_update_route(route_id: int, data: TaskRouteUpdate, db: Session = Depends(get_db)):
+    route = db.query(TaskRoute).filter(TaskRoute.id == route_id).first()
+    if not route:
+        raise HTTPException(404, "경로를 찾을 수 없습니다")
 
-.running {{ color:#0be881; }}
-.waiting {{ color:#ffc048; }}
-.error {{ color:#e94560; }}
-.idle {{ color:#666; }}
-.charging {{ color:#00d2d3; }}
-.moving {{ color:#a29bfe; }}
+    if data.name is not None:
+        route.name = data.name
 
-.spinner {{
-  display:inline-block; width:clamp(20px,4vw,36px); height:clamp(20px,4vw,36px);
-  border:4px solid rgba(255,255,255,0.2); border-top-color:#fff;
-  border-radius:50%; animation:spin 0.8s linear infinite; margin-right:10px;
-  vertical-align:middle;
-}}
-@keyframes spin {{ to {{ transform:rotate(360deg); }} }}
+    if data.waypoints is not None:
+        db.query(TaskRouteWaypoint).filter(TaskRouteWaypoint.route_id == route_id).delete()
+        for wp in data.waypoints:
+            db.add(TaskRouteWaypoint(
+                route_id=route_id,
+                poi_id=wp.poi_id,
+                order=wp.order,
+                waypoint_type=wp.waypoint_type,
+                wait_sec=wp.wait_sec,
+            ))
 
-.stuck-banner {{
-  display:none; position:fixed; top:0; left:0; right:0;
-  background:linear-gradient(135deg,#e94560,#c23152); color:#fff;
-  text-align:center; font-size:clamp(1.6rem,5vw,2.8rem); font-weight:800;
-  padding:clamp(12px,3vh,28px) 20px; z-index:1000;
-  animation:pulse 1.5s ease-in-out infinite;
-}}
-.stuck-banner.show {{ display:block; }}
-@keyframes pulse {{
-  0%,100% {{ opacity:1; }}
-  50% {{ opacity:0.6; }}
-}}
-</style>
-</head>
-<body>
+    db.commit()
+    db.refresh(route)
+    return _route_to_response(route)
 
-<div class="stuck-banner" id="stuckBanner">장애물 감지 — 작업중입니다. 비켜주세요!</div>
 
-<div class="status-box">
-  <div class="poi-name" id="poiName">-</div>
-  <div class="status-text" id="statusText">연결 중...</div>
-  <div class="loop-info" id="loopInfo"></div>
-  <button id="btn-confirm" onclick="doConfirm()">✔ 작업 확인</button>
-</div>
+@router.delete("/routes/{route_id}")
+def api_delete_route(route_id: int, db: Session = Depends(get_db)):
+    route = db.query(TaskRoute).filter(TaskRoute.id == route_id).first()
+    if not route:
+        raise HTTPException(404, "경로를 찾을 수 없습니다")
+    # 연관된 스케줄 삭제
+    db.query(ScheduledTask).filter(ScheduledTask.route_id == route_id).delete()
+    # 연관된 웨이포인트 삭제
+    db.query(TaskRouteWaypoint).filter(TaskRouteWaypoint.route_id == route_id).delete()
+    db.delete(route)
+    db.commit()
+    return {"message": "삭제 완료"}
 
-<script>
-const ROBOT_ID = {robot_id};
-const API = window.location.origin + '/api/tasks';
-const AUDIO_URL = window.location.origin + '/static/audio/please_move.mp3';
-let polling = null;
-let stuckAudio = null;
-let wasStuck = false;
-let audioPlaying = false;
-let autoConfirmTimer = null;
-const AUTO_CONFIRM_SEC = 2;
 
-// 음성 재생 (장애물 감지 시)
-function playStuckAudio() {{
-  if (audioPlaying) return;
-  if (!stuckAudio) {{
-    stuckAudio = new Audio(AUDIO_URL);
-    stuckAudio.addEventListener('ended', () => {{ audioPlaying = false; }});
-    stuckAudio.addEventListener('error', () => {{ audioPlaying = false; }});
-  }}
-  audioPlaying = true;
-  stuckAudio.currentTime = 0;
-  stuckAudio.play().catch(() => {{ audioPlaying = false; }});
-}}
+# ══════════════════════════════════════
+# 스케줄 작업 CRUD
+# ══════════════════════════════════════
 
-function handleStuck(isStuck) {{
-  const banner = document.getElementById('stuckBanner');
-  if (isStuck) {{
-    banner.classList.add('show');
-    if (!wasStuck) {{
-      playStuckAudio();
-    }}
-  }} else {{
-    banner.classList.remove('show');
-  }}
-  wasStuck = isStuck;
-}}
+def _task_to_response(task: ScheduledTask) -> dict:
+    route = task.route
+    robot_name = task.robot.name if task.robot else None
+    return {
+        "id": task.id,
+        "name": task.name,
+        "route_id": task.route_id,
+        "route_name": route.name if route else None,
+        "robot_id": task.robot_id,
+        "robot_name": robot_name,
+        "start_time": task.start_time,
+        "end_time": task.end_time,
+        "repeat_type": task.repeat_type,
+        "repeat_days": task.repeat_days,
+        "start_date": task.start_date,
+        "end_date": task.end_date,
+        "is_active": task.is_active,
+        "last_run_at": task.last_run_at,
+        "next_run_at": get_next_run_time(task.id),
+        "created_at": task.created_at,
+    }
 
-// POI 이름 → 표시명 매핑
-const poiDisplayName = {{
-  'WORK2': '투입',
-  'WORK4': '배출',
-}};
 
-async function fetchStatus() {{
-  try {{
-    const r = await fetch(API + '/loop/status/' + ROBOT_ID);
-    const d = await r.json();
-    render(d);
-  }} catch(e) {{
-    document.getElementById('statusText').innerHTML =
-      '<span class="error">서버 연결 실패</span>';
-  }}
-}}
+@router.get("")
+def api_get_tasks(
+    is_active: bool | None = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    from datetime import date as date_cls
+    # 만료된 once 작업 자동 삭제 (cascade 방지)
+    expired_ids = [t.id for t in db.query(ScheduledTask.id).filter(
+        ScheduledTask.repeat_type == "once",
+        ScheduledTask.start_date < date_cls.today(),
+    ).all()]
+    if expired_ids:
+        db.query(TaskHistory).filter(TaskHistory.task_id.in_(expired_ids)).delete(synchronize_session=False)
+        db.query(ScheduledTask).filter(ScheduledTask.id.in_(expired_ids)).delete(synchronize_session=False)
+        db.commit()
 
-function render(d) {{
-  handleStuck(!!d.stuck);
-  const poi = d.current_poi || '';
-  const btn = document.getElementById('btn-confirm');
-  const poiEl = document.getElementById('poiName');
-  const statusEl = document.getElementById('statusText');
-  const loopEl = document.getElementById('loopInfo');
-  const stopName = poiDisplayName[poi];
+    query = db.query(ScheduledTask)
+    if is_active is not None:
+        query = query.filter(ScheduledTask.is_active == is_active)
+    total = query.count()
+    tasks = query.order_by(ScheduledTask.id.desc()).offset(skip).limit(limit).all()
+    return {"total": total, "items": [_task_to_response(t) for t in tasks]}
 
-  statusEl.style.display = 'none';
-  cancelAutoConfirm();
-  btn.classList.remove('show');
 
-  if (d.status === 'moving_to_start' || d.status === 'starting') {{
-    poiEl.textContent = '작업 진입중';
-    poiEl.style.color = '#a29bfe';
-    statusEl.style.display = '';
-    statusEl.innerHTML = '<span class="moving"><span class="spinner"></span></span>';
-  }} else if (d.status === 'running') {{
-    poiEl.textContent = stopName ? (stopName + ' 위치 이동중') : '이동 중';
-    poiEl.style.color = '#0be881';
-    statusEl.style.display = '';
-    statusEl.innerHTML = '<span class="running"><span class="spinner"></span></span>';
-  }} else if (d.status === 'waiting_confirmation') {{
-    poiEl.textContent = stopName || poi;
-    poiEl.style.color = '#ffc048';
-    btn.classList.add('show');
-    startAutoConfirm();
-  }} else if (d.status === 'returning') {{
-    poiEl.textContent = '복귀중';
-    poiEl.style.color = '#a29bfe';
-    statusEl.style.display = '';
-    statusEl.innerHTML = '<span class="moving"><span class="spinner"></span></span>';
-  }} else if (d.status === 'charging_route' || d.status === 'low_battery_charging') {{
-    poiEl.textContent = '충전소 이동중';
-    poiEl.style.color = '#00d2d3';
-    statusEl.style.display = '';
-    statusEl.innerHTML = '<span class="charging"><span class="spinner"></span></span>';
-  }} else if (d.status === 'charging') {{
-    poiEl.textContent = '충전중';
-    poiEl.style.color = '#00d2d3';
-  }} else if (d.status === 'error') {{
-    poiEl.textContent = '오류 발생';
-    poiEl.style.color = '#e94560';
-    if (d.message) {{
-      statusEl.style.display = '';
-      statusEl.innerHTML = '<span class="error">' + d.message + '</span>';
-    }}
-  }} else {{
-    poiEl.textContent = '대기중';
-    poiEl.style.color = '#666';
-  }}
+@router.post("", status_code=201)
+def api_create_task(data: ScheduledTaskCreate, db: Session = Depends(get_db)):
+    route = db.query(TaskRoute).filter(TaskRoute.id == data.route_id).first()
+    if not route:
+        raise HTTPException(404, "경로를 찾을 수 없습니다")
 
-  loopEl.textContent = d.loop ? ('반복 ' + d.loop + '회') : '';
-}}
+    robot = db.query(Robot).filter(Robot.id == data.robot_id).first()
+    if not robot:
+        raise HTTPException(404, "로봇을 찾을 수 없습니다")
 
-function startAutoConfirm() {{
-  if (autoConfirmTimer) return;
-  autoConfirmTimer = setTimeout(() => {{
-    autoConfirmTimer = null;
-    doConfirm();
-  }}, AUTO_CONFIRM_SEC * 1000);
-}}
+    task = ScheduledTask(
+        name=data.name,
+        robot_id=data.robot_id,
+        route_id=data.route_id,
+        start_time=data.start_time,
+        end_time=data.end_time,
+        repeat_type=data.repeat_type,
+        repeat_days=data.repeat_days,
+        start_date=data.start_date,
+        end_date=data.end_date,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
 
-function cancelAutoConfirm() {{
-  if (autoConfirmTimer) {{
-    clearTimeout(autoConfirmTimer);
-    autoConfirmTimer = null;
-  }}
-}}
+    add_task_job_by_id(task.id)
 
-async function doConfirm() {{
-  cancelAutoConfirm();
-  const btn = document.getElementById('btn-confirm');
-  btn.disabled = true;
-  btn.textContent = '전송 중...';
-  try {{
-    const r = await fetch(API + '/loop/confirm/' + ROBOT_ID, {{ method: 'POST' }});
-    const d = await r.json();
-    if (r.ok) {{
-      btn.textContent = '✔ 확인 완료';
-      btn.style.background = 'linear-gradient(135deg,#0be881,#05c46b)';
-      setTimeout(() => {{
-        cancelAutoConfirm(); btn.classList.remove('show');
-        btn.disabled = false;
-        btn.textContent = '✔ 작업 확인';
-        btn.style.background = '';
-      }}, 1500);
-    }} else {{
-      btn.textContent = d.detail || '오류';
-      setTimeout(() => {{ btn.disabled = false; btn.textContent = '✔ 작업 확인'; }}, 2000);
-    }}
-  }} catch(e) {{
-    btn.textContent = '전송 실패';
-    setTimeout(() => {{ btn.disabled = false; btn.textContent = '✔ 작업 확인'; }}, 2000);
-  }}
-}}
+    from app.crud.activity_log import log_activity
+    log_activity("user", "schedule_create", f"스케줄 생성: {data.name} (경로: {route.name})", source="api_create_task")
+    return _task_to_response(task)
 
-// 1초 간격 폴링
-fetchStatus();
-polling = setInterval(fetchStatus, 1000);
-</script>
-</body>
-</html>"""
+
+@router.get("/schedule/{task_id}")
+def api_get_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(404, "작업을 찾을 수 없습니다")
+    return _task_to_response(task)
+
+
+@router.put("/schedule/{task_id}")
+def api_update_task(task_id: int, data: ScheduledTaskUpdate, db: Session = Depends(get_db)):
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(404, "작업을 찾을 수 없습니다")
+
+    for k, v in data.model_dump(exclude_unset=True).items():
+        setattr(task, k, v)
+    db.commit()
+    db.refresh(task)
+
+    if task.is_active:
+        add_task_job_by_id(task.id)
+    else:
+        remove_task_job(task.id)
+
+    return _task_to_response(task)
+
+
+@router.delete("/schedule/{task_id}")
+def api_delete_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(404, "작업을 찾을 수 없습니다")
+    remove_task_job(task.id)
+    db.delete(task)
+    db.commit()
+    return {"message": "삭제 완료"}
+
+
+@router.post("/schedule/{task_id}/toggle")
+def api_toggle_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(404, "작업을 찾을 수 없습니다")
+    task.is_active = not task.is_active
+    db.commit()
+    db.refresh(task)
+    if task.is_active:
+        add_task_job_by_id(task.id)
+    else:
+        remove_task_job(task.id)
+    return _task_to_response(task)
+
+
+@router.post("/schedule/{task_id}/run")
+def api_run_task_now(task_id: int, db: Session = Depends(get_db)):
+    task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+    if not task:
+        raise HTTPException(404, "작업을 찾을 수 없습니다")
+    t = threading.Thread(target=execute_scheduled_task, args=[task_id], daemon=True)
+    t.start()
+    return {"message": "작업 실행 시작", "task_id": task_id}
+
+
+# ══════════════════════════════════════
+# 수동 실행 (스케줄 생성 없이)
+# ══════════════════════════════════════
+
+from pydantic import BaseModel as _BaseModel
+
+class ManualRunRequest(_BaseModel):
+    robot_id: int
+    route_id: int
+
+@router.post("/manual-run")
+def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
+    """수동 배차 — 스케줄 생성 없이 즉시 실행"""
+    robot = db.query(Robot).filter(Robot.id == data.robot_id).first()
+    if not robot or not robot.ip_address:
+        raise HTTPException(404, "로봇을 찾을 수 없습니다")
+
+    route = db.query(TaskRoute).filter(TaskRoute.id == data.route_id).first()
+    if not route:
+        raise HTTPException(404, "경로를 찾을 수 없습니다")
+
+    waypoints = db.query(TaskRouteWaypoint).filter(
+        TaskRouteWaypoint.route_id == route.id
+    ).order_by(TaskRouteWaypoint.order).all()
+
+    wp_list = []
+    first_pickup = first_dropoff = None
+    for wp in waypoints:
+        poi = db.query(MapPOI).filter(MapPOI.id == wp.poi_id).first()
+        if not poi:
+            continue
+        wp_list.append({
+            "name": poi.name, "x": poi.world_x, "y": poi.world_y,
+            "ori": poi.angle or 0, "waypoint_type": wp.waypoint_type,
+            "poi_type": poi.poi_type or "general", "wait_sec": wp.wait_sec or 0,
+        })
+        if wp.waypoint_type == "pickup" and not first_pickup:
+            first_pickup = poi.name
+        if wp.waypoint_type == "dropoff" and not first_dropoff:
+            first_dropoff = poi.name
+
+    if len(wp_list) < 2:
+        raise HTTPException(400, "경로에 웨이포인트가 부족합니다")
+
+    # 이력 생성
+    from datetime import datetime
+    history = TaskHistory(
+        task_name=f"수동: {route.name}",
+        route_name=route.name,
+        robot_id=robot.id,
+        robot_name=robot.name,
+        pickup_poi_name=first_pickup,
+        dropoff_poi_name=first_dropoff,
+        status="running",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(history)
+    history_id = history.id
+    robot_ip = robot.ip_address
+
+    def _run():
+        from app.services.jack_service import run_route_job
+        from app.services.scheduler import _return_to_charger
+        from app.database import SessionLocal
+        result = run_route_job(robot_ip, wp_list)
+        db2 = SessionLocal()
+        try:
+            h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
+            if h:
+                h.status = "succeeded" if result["status"] == "done" else "failed"
+                h.finished_at = datetime.now()
+                h.error_message = result.get("message") if result["status"] != "done" else None
+                db2.commit()
+        finally:
+            db2.close()
+        # 작업 완료 후 충전소 복귀
+        _return_to_charger(robot_ip, wp_list)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    from app.crud.activity_log import log_activity
+    log_activity("user", "manual_run", f"수동 배차: {route.name} → {robot.name}", source="api_manual_run")
+    return {"message": "수동 실행 시작", "history_id": history_id}
+
+
+class ManualRunPoisRequest(_BaseModel):
+    robot_id: int
+    pickup_poi_id: int
+    dropoff_poi_id: int
+
+@router.post("/manual-run-pois")
+def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db)):
+    """수동 배차 — 픽업/드롭오프 POI 직접 지정"""
+    robot = db.query(Robot).filter(Robot.id == data.robot_id).first()
+    if not robot or not robot.ip_address:
+        raise HTTPException(404, "로봇을 찾을 수 없습니다")
+
+    pickup = db.query(MapPOI).filter(MapPOI.id == data.pickup_poi_id, MapPOI.is_active == True).first()
+    dropoff = db.query(MapPOI).filter(MapPOI.id == data.dropoff_poi_id, MapPOI.is_active == True).first()
+    if not pickup or not dropoff:
+        raise HTTPException(404, "POI를 찾을 수 없습니다")
+
+    wp_list = [
+        {"name": pickup.name, "x": pickup.world_x, "y": pickup.world_y,
+         "ori": pickup.angle or 0, "waypoint_type": "pickup",
+         "poi_type": pickup.poi_type or "general", "wait_sec": 0},
+        {"name": dropoff.name, "x": dropoff.world_x, "y": dropoff.world_y,
+         "ori": dropoff.angle or 0, "waypoint_type": "dropoff",
+         "poi_type": dropoff.poi_type or "general", "wait_sec": 0},
+    ]
+
+    from datetime import datetime
+    history = TaskHistory(
+        task_name=f"수동: {pickup.name}→{dropoff.name}",
+        route_name=f"{pickup.name}→{dropoff.name}",
+        robot_id=robot.id,
+        robot_name=robot.name,
+        pickup_poi_name=pickup.name,
+        dropoff_poi_name=dropoff.name,
+        status="running",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(history)
+    history_id = history.id
+    robot_ip = robot.ip_address
+
+    def _run():
+        from app.services.jack_service import run_route_job
+        from app.services.scheduler import _return_to_charger
+        from app.database import SessionLocal
+        result = run_route_job(robot_ip, wp_list)
+        db2 = SessionLocal()
+        try:
+            h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
+            if h:
+                h.status = "succeeded" if result["status"] == "done" else "failed"
+                h.finished_at = datetime.now()
+                h.error_message = result.get("message") if result["status"] != "done" else None
+                db2.commit()
+        finally:
+            db2.close()
+        # 작업 완료 후 충전소 복귀
+        _return_to_charger(robot_ip, wp_list)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    from app.crud.activity_log import log_activity
+    log_activity("user", "manual_run", f"수동 배차: {pickup.name}→{dropoff.name} ({robot.name})", source="api_manual_run_pois")
+    return {"message": "수동 실행 시작", "history_id": history_id}
+
+
+# ══════════════════════════════════════
+# 실행 이력
+# ══════════════════════════════════════
+
+@router.get("/history/all")
+def api_get_all_history(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    query = db.query(TaskHistory)
+    total = query.count()
+    items = query.order_by(TaskHistory.id.desc()).offset(skip).limit(limit).all()
+    return {
+        "total": total,
+        "items": [TaskHistoryResponse.model_validate(h).model_dump() for h in items],
+    }
+
+
+@router.get("/history/{task_id}")
+def api_get_task_history(
+    task_id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    query = db.query(TaskHistory).filter(TaskHistory.task_id == task_id)
+    total = query.count()
+    items = query.order_by(TaskHistory.id.desc()).offset(skip).limit(limit).all()
+    return {
+        "total": total,
+        "items": [TaskHistoryResponse.model_validate(h).model_dump() for h in items],
+    }
+
+
+# ── 통계 API ──
+
+@router.get("/stats/completion")
+def api_stats_completion(
+    days: int = Query(default=7, ge=1, le=90),
+    start_date: str = Query(default=None),
+    end_date: str = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """일별 작업 완료율 (완료/실패/취소 건수)"""
+    from sqlalchemy import func, case, cast, Date, text
+    from datetime import timedelta
+
+    if start_date and end_date:
+        since = datetime.strptime(start_date, "%Y-%m-%d")
+        until = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    else:
+        since = datetime.now() - timedelta(days=days)
+        until = datetime.now() + timedelta(days=1)
+    rows = (
+        db.query(
+            cast(TaskHistory.started_at, Date).label("date"),
+            func.count().label("total"),
+            func.sum(case((TaskHistory.status == "succeeded", 1), else_=0)).label("completed"),
+            func.sum(case((TaskHistory.status == "failed", 1), else_=0)).label("failed"),
+            func.sum(case((TaskHistory.status == "cancelled", 1), else_=0)).label("cancelled"),
+        )
+        .filter(TaskHistory.started_at >= since, TaskHistory.started_at < until)
+        .group_by(cast(TaskHistory.started_at, Date))
+        .order_by(cast(TaskHistory.started_at, Date))
+        .all()
+    )
+    return [
+        {
+            "date": str(r.date),
+            "total": r.total,
+            "completed": int(r.completed or 0),
+            "failed": int(r.failed or 0),
+            "cancelled": int(r.cancelled or 0),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/stats/robot-utilization")
+def api_stats_robot_utilization(
+    days: int = Query(default=7, ge=1, le=90),
+    start_date: str = Query(default=None),
+    end_date: str = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """로봇별 작업 건수 및 총 소요 시간"""
+    from sqlalchemy import func, text
+    from datetime import timedelta
+
+    if start_date and end_date:
+        since = datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        since = datetime.now() - timedelta(days=days)
+    rows = (
+        db.query(
+            TaskHistory.robot_name,
+            func.count().label("task_count"),
+            func.sum(
+                func.timestampdiff(
+                    text("SECOND"),
+                    TaskHistory.started_at,
+                    TaskHistory.finished_at,
+                )
+            ).label("total_seconds"),
+        )
+        .filter(TaskHistory.started_at >= since, TaskHistory.finished_at.isnot(None))
+        .group_by(TaskHistory.robot_name)
+        .all()
+    )
+    return [
+        {
+            "robot_name": r.robot_name or "알 수 없음",
+            "task_count": r.task_count,
+            "total_minutes": round((r.total_seconds or 0) / 60, 1),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/stats/route-duration")
+def api_stats_route_duration(
+    days: int = Query(default=7, ge=1, le=90),
+    start_date: str = Query(default=None),
+    end_date: str = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """경로별 평균 소요 시간"""
+    from sqlalchemy import func, text
+    from datetime import timedelta
+
+    if start_date and end_date:
+        since = datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        since = datetime.now() - timedelta(days=days)
+    rows = (
+        db.query(
+            TaskHistory.route_name,
+            func.count().label("count"),
+            func.avg(
+                func.timestampdiff(
+                    text("SECOND"),
+                    TaskHistory.started_at,
+                    TaskHistory.finished_at,
+                )
+            ).label("avg_seconds"),
+        )
+        .filter(
+            TaskHistory.started_at >= since,
+            TaskHistory.finished_at.isnot(None),
+            TaskHistory.route_name.isnot(None),
+        )
+        .group_by(TaskHistory.route_name)
+        .all()
+    )
+    return [
+        {
+            "route_name": r.route_name,
+            "count": r.count,
+            "avg_minutes": round((r.avg_seconds or 0) / 60, 1),
+        }
+        for r in rows
+    ]

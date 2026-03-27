@@ -1,86 +1,73 @@
-export type TaskType = "Jacking" | "Transport" | "Disinfect" | "Park" | "Charge";
-
-export type TaskMode = "DRIVING" | "STRICT_DRIVING";
-
-export type RouteItem = {
-  id: string;
-  pathName: string;
-  robotLabel: string;
-  description: string;
+// 경로
+export type TaskRouteWaypoint = {
+  id?: number;
+  poi_id: number;
+  poi_name?: string;
+  order: number;
+  waypoint_type: "pickup" | "dropoff" | "standby" | "charging";
+  world_x?: number;
+  world_y?: number;
 };
 
-export type CreateTaskFormState = {
-  taskType: TaskType | "";
-  robot: string;
-  maxSpeed: number;
-  mode: TaskMode | "";
-  detourR: number;
-  cycles: number;
-  selectedRoutes: string[];
+export type TaskRoute = {
+  id: number;
+  name: string;
+  waypoints: TaskRouteWaypoint[];
+  is_active: boolean;
+  created_at: string | null;
 };
 
-export type CreateTaskPayload = {
-  taskType: TaskType;
-  robot: string;
-  maxSpeed: number;
-  mode: TaskMode;
-  detourR: number;
-  cycles: number;
-  routes: string[];
+export type TaskRouteCreate = {
+  name: string;
+  waypoints: { poi_id: number; order: number; waypoint_type: string; wait_sec?: number }[];
 };
 
-export type CreateTaskModalProps = {
-  open: boolean;
-  onClose: () => void;
+// 스케줄
+export type RepeatType = "once" | "daily" | "weekly";
+
+export type ScheduledTask = {
+  id: number;
+  name: string;
+  route_id: number;
+  route_name: string | null;
+  robot_id: number;
+  robot_name: string | null;
+  start_time: string;
+  end_time: string | null;
+  repeat_type: RepeatType;
+  repeat_days: string | null;
+  start_date: string;
+  end_date: string | null;
+  is_active: boolean;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  created_at: string | null;
 };
 
-/* ── Task List Page ── */
-
-export type TaskListState =
-  | "FINISHED"
-  | "WAITING"
-  | "InPROGRESS"
-  | "PAUSED"
-  | "UNROUTABLE"
-  | "FAILED";
-
-export type TaskListItem = {
-  id: string;
-  waybillNumber: string;
-  taskId: string;
-  robotSn: string;
-  state: TaskListState;
-  taskType: TaskType;
-  createTime: string;
-  endTime: string | null;
-  start: string | null;
-  end: string | null;
-  passing: string | null;
+export type ScheduledTaskCreate = {
+  name: string;
+  robot_id: number;
+  route_id: number;
+  start_time: string;
+  end_time?: string | null;
+  repeat_type: RepeatType;
+  repeat_days?: string | null;
+  start_date: string;
+  end_date?: string | null;
 };
 
-export type TaskListFilterState = {
-  waybillNum: string;
-  robotSn: string;
-  taskType: TaskType | "";
-  state: TaskListState | "";
-  dateStart: string | null;
-  dateEnd: string | null;
-};
-
-export type TaskListFilterProps = {
-  filters: TaskListFilterState;
-  robotSns: string[];
-  onFilterChange: (filters: TaskListFilterState) => void;
-  onSearch: () => void;
-};
-
-export type TaskListTableProps = {
-  tasks: TaskListItem[];
-  onInfoClick: (taskId: string) => void;
-};
-
-export type DateRangePickerProps = {
-  startDate: string | null;
-  endDate: string | null;
-  onChange: (start: string | null, end: string | null) => void;
+// 이력
+export type TaskHistory = {
+  id: number;
+  task_id: number | null;
+  task_name: string | null;
+  route_name: string | null;
+  robot_id: number;
+  robot_name: string | null;
+  pickup_poi_name: string | null;
+  dropoff_poi_name: string | null;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  started_at: string | null;
+  finished_at: string | null;
+  error_message: string | null;
 };

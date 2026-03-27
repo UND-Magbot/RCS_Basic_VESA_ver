@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import math
 import uuid
@@ -18,8 +19,14 @@ STATIC_MAPS_DIR.mkdir(parents=True, exist_ok=True)
 from app.database import get_db
 from app.crud.activity_log import log_activity
 from app.models.robot import Robot
-from app.models.map import RobotMap, Business, Area
-from app.routers.robot import ROBOTS
+from app.models.map import RobotMap, Business, Area, MapPolygon, MapPOI
+from app.routers.robot import DEFAULT_SECRET
+
+
+def _get_robots_from_db(db) -> list[dict]:
+    """DB에서 활성 로봇 IP 목록"""
+    robots = db.query(Robot).filter(Robot.is_active == True, Robot.ip_address != None).all()
+    return [{"ip": r.ip_address, "secret": DEFAULT_SECRET} for r in robots if r.ip_address]
 from app.crud.map import (
     get_businesses,
     create_business,
@@ -71,13 +78,7 @@ router = APIRouter(prefix="/api/map", tags=["맵 관리"])
 # ── helper ────────────────────────────────────────────────────
 
 def _find_secret(robot_ip: str) -> str:
-    for r in ROBOTS:
-        if r["ip"] == robot_ip:
-            return r["secret"]
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"등록된 로봇을 찾지 못했습니다: {robot_ip}",
-    )
+    return DEFAULT_SECRET
 
 
 def _proxy(func, *args, **kwargs) -> Any:
@@ -112,7 +113,7 @@ def _update_robots_area(db: Session, area_id: str):
         try:
             res = http_requests.get(
                 f"http://{robot.ip_address}:8090/device/info",
-                headers={"Secret": _find_secret(robot.ip_address)} if robot.ip_address in [r["ip"] for r in ROBOTS] else {},
+                headers={"Secret": DEFAULT_SECRET},
                 timeout=3,
             )
             res.raise_for_status()
@@ -282,6 +283,41 @@ def _build_charging_overlay_features(charging_pois: list) -> list[dict]:
     return features
 
 
+def _build_firewall_overlay_features(firewall_polygons: list) -> list[dict]:
+    """가상벽(firewall) 폴리곤을 로봇 오버레이용 GeoJSON Feature 리스트로 변환.
+
+    AutoXing 로봇 가상벽: overlay type="1", LineString 좌표 (폴리곤 둘레를 닫힌 LineString으로)
+    """
+    features = []
+    for poly in firewall_polygons:
+        wall_id = uuid.uuid4().hex[:24]
+        points = json.loads(poly.points_json) if isinstance(poly.points_json, str) else poly.points_json
+        coords = []
+        for pt in points:
+            wx = pt.get("worldX")
+            wy = pt.get("worldY")
+            if wx is not None and wy is not None:
+                coords.append([wx, wy])
+        if len(coords) < 3:
+            continue
+        # 닫힌 폴리곤 (첫 점 반복)
+        coords.append(coords[0])
+        features.append({
+            "id": wall_id,
+            "type": "Feature",
+            "geometry": {
+                "type": "LineString",
+                "coordinates": coords,
+            },
+            "properties": {
+                "mapOverlay": True,
+                "name": poly.name or f"VW_{wall_id[:6]}",
+                "type": "1",
+            },
+        })
+    return features
+
+
 # ── 로봇 목록 / 연결 확인 ─────────────────────────────────────
 
 @router.get("/robots")
@@ -323,12 +359,7 @@ def api_connect_robot(sn: str, db: Session = Depends(get_db)):
 
     try:
         url = f"http://{robot.ip_address}:8090/device/info"
-        secret = None
-        for r in ROBOTS:
-            if r["ip"] == robot.ip_address:
-                secret = r["secret"]
-                break
-        headers = {"Secret": secret} if secret else {}
+        headers = {"Secret": DEFAULT_SECRET}
         res = http_requests.get(url, headers=headers, timeout=10)
         res.raise_for_status()
         device_info = res.json()
@@ -584,7 +615,7 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
                     return
 
                 # ── 1) 서버 데이터 기반 즉시 동기화 (소스 로봇 대기 불필요) ──
-                targets = [r["ip"] for r in ROBOTS if r["ip"] != source_ip]
+                targets = [r["ip"] for r in _get_robots_from_db(sync_db) if r["ip"] != source_ip]
                 if targets:
                     logger.info(f"[auto-sync] 서버 데이터 기반 즉시 동기화: → {targets}")
                     for target_ip in targets:
@@ -773,28 +804,150 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
             detail="서버에 저장된 매핑 데이터가 없습니다. 맵을 다시 저장해주세요.",
         )
 
-    # ── 2) 충전소 오버레이 구성 (DB 기반) ──
+    # ── 2) 오버레이 구성 (병합 방식: 로봇 기존 오버레이 보존) ──
+    # 우리가 관리하는 오버레이 타입
+    CHARGING_TYPES = {"9", "36"}       # 충전소, 도킹포인트
+    FIREWALL_TYPES = {"1"}             # 가상벽
+
     overlay_data = {"type": "FeatureCollection", "features": []}
     overlay_synced = False
     overlay_error = None
+    jack_pois = []
     try:
+        # 1) 로봇 기존 오버레이 읽기
+        existing_other = []       # 관리 외 feature
+        existing_charging = []    # 기존 충전소 feature (DB에 없으면 보존용)
+        existing_firewall = []    # 기존 가상벽 feature (DB에 없으면 보존용)
+        try:
+            r_cur = http_requests.get(
+                f"http://{robot_ip}:8090/chassis/current-map",
+                headers={"Authorization": f"Secret {target_secret}"},
+                timeout=5,
+            )
+            if r_cur.status_code == 200:
+                cur_map_id = r_cur.json().get("id")
+                if cur_map_id:
+                    r_map = http_requests.get(
+                        f"http://{robot_ip}:8090/maps/{cur_map_id}",
+                        headers={"Authorization": f"Secret {target_secret}"},
+                        timeout=5,
+                    )
+                    if r_map.status_code == 200:
+                        import json as _json_overlay
+                        old_overlays = _json_overlay.loads(r_map.json().get("overlays", "{}"))
+                        for feat in old_overlays.get("features", []):
+                            feat_type = str(feat.get("properties", {}).get("type", ""))
+                            if feat_type in CHARGING_TYPES:
+                                existing_charging.append(feat)
+                            elif feat_type in FIREWALL_TYPES:
+                                existing_firewall.append(feat)
+                            elif feat_type == "34":
+                                pass  # Shelves Point는 DB에서 새로 생성하므로 기존 것 제외
+                            else:
+                                existing_other.append(feat)
+                        logger.info(f"[sync] 기존 오버레이: 충전소={len(existing_charging)} "
+                                    f"가상벽={len(existing_firewall)} 기타={len(existing_other)}")
+        except Exception as e:
+            logger.warning(f"[sync] 기존 오버레이 읽기 실패 (새로 구성): {e}")
+
+        # 2) DB에서 새 feature 조회 (있으면 교체, 없으면 기존 보존)
+        new_charging = []
         charging_pois = get_charging_pois(db, map_id)
         if charging_pois:
-            new_features = _build_charging_overlay_features(charging_pois)
-            logger.info(f"[sync] 충전소 POI {len(charging_pois)}개 → Feature {len(new_features)}개 생성")
-            overlay_data["features"] = new_features
-            overlay_synced = True
+            new_charging = _build_charging_overlay_features(charging_pois)
+            logger.info(f"[sync] 충전소 POI {len(charging_pois)}개 → Feature {len(new_charging)}개 (DB)")
         else:
-            logger.info("[sync] 충전소 POI 없음")
+            new_charging = existing_charging
+            logger.info(f"[sync] 충전소 POI DB에 없음 → 기존 {len(existing_charging)}개 보존")
+
+        new_firewall = []
+        fw_polys = db.query(MapPolygon).filter(
+            MapPolygon.map_id == map_id,
+            MapPolygon.shape_type == "firewall",
+            MapPolygon.is_active == True,
+        ).all()
+        if fw_polys:
+            new_firewall = _build_firewall_overlay_features(fw_polys)
+            logger.info(f"[sync] 가상벽 {len(fw_polys)}개 → Feature {len(new_firewall)}개 (DB)")
+        else:
+            new_firewall = existing_firewall
+            logger.info(f"[sync] 가상벽 DB에 없음 → 기존 {len(existing_firewall)}개 보존")
+
+        # 3) jack 타입 POI → Shelves Point overlay 생성 (type=34, subtype=rack)
+        new_shelves_points = []
+        jack_pois = db.query(MapPOI).filter(
+            MapPOI.map_id == map_id,
+            MapPOI.poi_type == "jack",
+            MapPOI.is_active == True,
+        ).all()
+        if jack_pois:
+            import math as _math
+            for jp in jack_pois:
+                wx = jp.world_x if jp.world_x is not None else 0.0
+                wy = jp.world_y if jp.world_y is not None else 0.0
+                yaw_deg = str(round((jp.angle or 0) * 180 / _math.pi, 2))
+                new_shelves_points.append({
+                    "id": f"shelves_{jp.id}",
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [wx, wy],
+                    },
+                    "properties": {
+                        "deviceIds": None,
+                        "dockViaDirection": "front",
+                        "enforcePullOut": False,
+                        "hasFixedLegs": False,
+                        "mapOverlay": True,
+                        "name": jp.name,
+                        "shelvesState": "0",
+                        "subtype": "rack",
+                        "type": "34",
+                        "yaw": yaw_deg,
+                    }
+                })
+            logger.info(f"[sync] 잭킹 POI {len(jack_pois)}개 → Shelves Point {len(new_shelves_points)}개")
+
+        # 4) 병합: 기타 + 충전소 + 가상벽 + Shelves Point
+        merged = existing_other + new_charging + new_firewall + new_shelves_points
+        overlay_data["features"] = merged
+        overlay_synced = True
+        logger.info(f"[sync] 오버레이 병합 완료: 기타={len(existing_other)} + 충전소={len(new_charging)} "
+                     f"+ 가상벽={len(new_firewall)} + Shelves Point={len(new_shelves_points)} = {len(merged)}")
     except Exception as e:
         overlay_error = str(e)
-        logger.error(f"[sync] 충전소 오버레이 처리 실패: {e}")
+        logger.error(f"[sync] 오버레이 처리 실패: {e}")
 
     logger.info(f"[sync] 타겟: {robot_ip} ({sync_method}), "
                 f"carto_map: {len(mapping_data.get('carto_map', ''))}자, "
                 f"오버레이: {len(overlay_data.get('features', []))}개")
 
-    # ── 3) full 방식: 서버 데이터로 전체 동기화 ──
+    # ── 3) jack POI가 있으면 rack.specs 자동 설정 ──
+    if jack_pois:
+        try:
+            _rack_specs = {
+                "rack.specs": [{
+                    "width": 0.66, "depth": 0.70,
+                    "margin": [0, 0, 0, 0],
+                    "alignment": "center",
+                    "alignment_margin_back": 0.02,
+                    "extra_leg_offset": 0.015,
+                    "leg_shape": "square",
+                    "leg_size": 0.03,
+                    "foot_radius": 0.0,
+                    "cargo_to_jack_front_edge_min_distance": 0.05,
+                }]
+            }
+            http_requests.patch(
+                f"http://{robot_ip}:8090/system/settings/user",
+                headers={"Authorization": f"Secret {target_secret}"},
+                json=_rack_specs, timeout=5,
+            )
+            logger.info(f"[sync] rack.specs 자동 설정 완료 → {robot_ip}")
+        except Exception as e:
+            logger.warning(f"[sync] rack.specs 설정 실패: {e}")
+
+    # ── 4) full 방식: 서버 데이터로 전체 동기화 ──
     if sync_method == "full":
         result = _sync_full_from_server(
             mapping_data, robot_ip, target_secret, area_name,
@@ -805,7 +958,7 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
                      source="api_sync_map_to_robot")
         return result
 
-    # ── 4) patch 방식: 오버레이만 동기화 ──
+    # ── 5) patch 방식: 오버레이만 동기화 ──
     result = _sync_patch_to_robot(
         robot_ip, target_secret,
         overlay_data, overlay_synced, overlay_error,
@@ -866,7 +1019,7 @@ def _sync_full_from_server(
     logger.info(f"[sync:full] 타겟 {target_ip}: native={native_map_id}({native_map_name}), "
                 f"sync맵={sync_map_ids}")
 
-    # ── 2. 네이티브 맵 PUT 전체 교체 시도 (재부팅 생존) ──
+    # ── 2. 네이티브 맵 PUT 전체 교체 ──
     put_success = False
     if native_map_id is not None:
         put_data = {
@@ -892,6 +1045,66 @@ def _sync_full_from_server(
             logger.info(f"[sync:full] 서비스 재시작 요청 완료 (약 60-90초)")
         except Exception as e:
             logger.error(f"[sync:full] 서비스 재시작 실패: {e}")
+
+        # 서비스 재시작 후 Shelves Point overlay 재적용 (백그라운드)
+        shelves_features = [f for f in overlay_data.get("features", [])
+                           if str(f.get("properties", {}).get("type", "")) == "34"]
+        if shelves_features:
+            import threading
+            def _patch_shelves_after_restart():
+                """재시작 완료 대기 후 Shelves Point overlay PATCH"""
+                import time as _time
+                _time.sleep(90)  # 재시작 대기 (60-90초)
+                for attempt in range(3):
+                    try:
+                        # 현재 맵 ID 조회
+                        r_cur = http_requests.get(
+                            f"http://{target_ip}:8090/chassis/current-map",
+                            headers={"Authorization": f"Secret {target_secret}"},
+                            timeout=10,
+                        )
+                        if r_cur.status_code != 200:
+                            _time.sleep(15)
+                            continue
+                        cur_id = r_cur.json().get("id")
+                        if not cur_id:
+                            _time.sleep(15)
+                            continue
+
+                        # 기존 overlay 읽기
+                        r_map = http_requests.get(
+                            f"http://{target_ip}:8090/maps/{cur_id}",
+                            headers={"Authorization": f"Secret {target_secret}"},
+                            timeout=10,
+                        )
+                        existing_ov = _json.loads(r_map.json().get("overlays", "{}"))
+                        existing_feats = existing_ov.get("features", [])
+
+                        # 기존 Shelves Point 제거 후 새로 추가
+                        merged = [f for f in existing_feats
+                                  if str(f.get("properties", {}).get("type", "")) != "34"]
+                        merged.extend(shelves_features)
+
+                        new_ov = _json.dumps({"type": "FeatureCollection", "features": merged})
+                        http_requests.patch(
+                            f"http://{target_ip}:8090/maps/{cur_id}",
+                            headers={"Authorization": f"Secret {target_secret}"},
+                            json={"overlays": new_ov}, timeout=10,
+                        )
+                        # current-map 재선택 → 로봇이 overlay 리로드
+                        http_requests.post(
+                            f"http://{target_ip}:8090/chassis/current-map",
+                            headers={"Authorization": f"Secret {target_secret}"},
+                            json={"map_id": cur_id}, timeout=10,
+                        )
+                        logger.info(f"[sync:full] Shelves Point {len(shelves_features)}개 재적용 + 맵 리로드 완료 (맵 {cur_id})")
+                        return
+                    except Exception as ex:
+                        logger.warning(f"[sync:full] Shelves Point 재적용 시도 {attempt+1} 실패: {ex}")
+                        _time.sleep(15)
+
+            threading.Thread(target=_patch_shelves_after_restart, daemon=True).start()
+            logger.info(f"[sync:full] Shelves Point 재적용 예약됨 (90초 후, {len(shelves_features)}개)")
 
         # 이전 sync 맵 삭제
         for sid in sync_map_ids:
@@ -968,6 +1181,152 @@ def _sync_full_from_server(
         "overlay_error": overlay_error,
         "method": "full_fallback",
         "carto_map_size": len(carto_map),
+    }
+
+
+@router.post("/maps/{map_id}/sync-overlays")
+def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)):
+    """rack area 등 overlay만 로봇에 PATCH로 전송.
+
+    body: { robot_ip: str }
+    """
+    import json as _json
+
+    robot_ip = body.get("robot_ip")
+    if not robot_ip:
+        raise HTTPException(status_code=400, detail="robot_ip는 필수입니다.")
+
+    target_secret = _find_secret(robot_ip)
+
+    # DB에서 충전소 overlay
+    CHARGING_TYPES = {"9", "36"}
+    charging_features = []
+    charging_pois = get_charging_pois(db, map_id)
+    if charging_pois:
+        charging_features = _build_charging_overlay_features(charging_pois)
+
+    # DB에서 가상벽 overlay
+    fw_features = []
+    fw_polys = db.query(MapPolygon).filter(
+        MapPolygon.map_id == map_id,
+        MapPolygon.shape_type == "firewall",
+        MapPolygon.is_active == True,
+    ).all()
+    if fw_polys:
+        fw_features = _build_firewall_overlay_features(fw_polys)
+
+    # DB에서 jack POI → Shelves Point overlay (type=34, subtype=rack)
+    shelves_features = []
+    from app.models.map import MapPOI
+    jack_pois = db.query(MapPOI).filter(
+        MapPOI.map_id == map_id,
+        MapPOI.poi_type == "jack",
+        MapPOI.is_active == True,
+    ).all()
+    import math as _math2
+    for jp in jack_pois:
+        wx = jp.world_x if jp.world_x is not None else 0.0
+        wy = jp.world_y if jp.world_y is not None else 0.0
+        yaw_deg = str(round((jp.angle or 0) * 180 / _math2.pi, 2))
+        shelves_features.append({
+            "id": f"shelves_{jp.id}",
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [wx, wy]},
+            "properties": {
+                "deviceIds": None,
+                "dockViaDirection": "front",
+                "enforcePullOut": False,
+                "hasFixedLegs": False,
+                "mapOverlay": True,
+                "name": jp.name,
+                "shelvesState": "0",
+                "subtype": "rack",
+                "type": "34",
+                "yaw": yaw_deg,
+            }
+        })
+
+    # 로봇 기존 overlay에서 관리 외 feature 보존
+    existing_other = []
+    try:
+        r_cur = http_requests.get(
+            f"http://{robot_ip}:8090/chassis/current-map",
+            headers={"Authorization": f"Secret {target_secret}"},
+            timeout=5,
+        )
+        if r_cur.status_code == 200:
+            cur_map_id = r_cur.json().get("id")
+            if cur_map_id:
+                r_map = http_requests.get(
+                    f"http://{robot_ip}:8090/maps/{cur_map_id}",
+                    headers={"Authorization": f"Secret {target_secret}"},
+                    timeout=5,
+                )
+                if r_map.status_code == 200:
+                    old_overlays = _json.loads(r_map.json().get("overlays", "{}"))
+                    for feat in old_overlays.get("features", []):
+                        feat_type = str(feat.get("properties", {}).get("type", ""))
+                        feat_rt = str(feat.get("properties", {}).get("regionType", ""))
+                        # 충전소, 가상벽, Shelves Point 제외 → 나머지 보존
+                        if feat_type not in CHARGING_TYPES and feat_type != "1" and feat_type != "34":
+                            existing_other.append(feat)
+    except Exception as e:
+        logger.warning(f"[sync-overlays] 기존 overlay 읽기 실패: {e}")
+
+    # 병합
+    merged = existing_other + charging_features + fw_features + shelves_features
+    overlay_data = {"type": "FeatureCollection", "features": merged}
+    overlay_json = _json.dumps(overlay_data)
+
+    # PATCH + current-map 재선택
+    try:
+        r_cur = http_requests.get(
+            f"http://{robot_ip}:8090/chassis/current-map",
+            headers={"Authorization": f"Secret {target_secret}"},
+            timeout=5,
+        )
+        cur_map_id = r_cur.json().get("id")
+        patch_map_by_id(robot_ip, target_secret, cur_map_id, {"overlays": overlay_json})
+        # current-map 재선택 → 로봇이 overlay 리로드
+        http_requests.post(
+            f"http://{robot_ip}:8090/chassis/current-map",
+            headers={"Authorization": f"Secret {target_secret}"},
+            json={"map_id": cur_map_id}, timeout=10,
+        )
+        logger.info(f"[sync-overlays] overlay PATCH + 맵 리로드 완료: {len(merged)}개 features")
+    except Exception as e:
+        logger.error(f"[sync-overlays] overlay PATCH 실패: {e}")
+        raise HTTPException(status_code=500, detail=f"overlay 전송 실패: {e}")
+
+    # jack POI가 있으면 rack.specs 자동 설정
+    if jack_pois:
+        try:
+            http_requests.patch(
+                f"http://{robot_ip}:8090/system/settings/user",
+                headers={"Authorization": f"Secret {target_secret}"},
+                json={"rack.specs": [{
+                    "width": 0.66, "depth": 0.70,
+                    "margin": [0, 0, 0, 0], "alignment": "center",
+                    "alignment_margin_back": 0.02, "extra_leg_offset": 0.015,
+                    "leg_shape": "square", "leg_size": 0.03,
+                    "foot_radius": 0.0, "cargo_to_jack_front_edge_min_distance": 0.05,
+                }]}, timeout=5,
+            )
+            logger.info(f"[sync-overlays] rack.specs 자동 설정 완료 → {robot_ip}")
+        except Exception as e:
+            logger.warning(f"[sync-overlays] rack.specs 설정 실패: {e}")
+
+    log_activity("map", "overlay_sync",
+                 f"overlay 동기화 → {robot_ip}: 충전소={len(charging_features)} 가상벽={len(fw_features)} Shelves Point={len(shelves_features)}",
+                 source="api_sync_overlays_to_robot")
+
+    return {
+        "message": "overlay 동기화 완료",
+        "robot_ip": robot_ip,
+        "charging": len(charging_features),
+        "firewall": len(fw_features),
+        "shelves_point": len(shelves_features),
+        "total_features": len(merged),
     }
 
 
@@ -1360,14 +1719,7 @@ async def ws_map_relay(websocket: WebSocket, robot_ip: str, topics: Optional[str
     topics 파라미터로 구독할 토픽을 쉼표로 구분하여 지정 가능.
     예: ?topics=/tracked_pose,/trajectory
     """
-    secret: Optional[str] = None
-    for r in ROBOTS:
-        if r["ip"] == robot_ip:
-            secret = r["secret"]
-            break
-    if secret is None:
-        await websocket.close(code=4004, reason=f"로봇을 찾지 못했습니다: {robot_ip}")
-        return
+    secret = DEFAULT_SECRET
 
     await websocket.accept()
 
@@ -1404,3 +1756,23 @@ async def ws_map_relay(websocket: WebSocket, robot_ip: str, topics: Optional[str
         logger.error(f"[ws_map_relay] 릴레이 중 오류 ({robot_ip}): {e}")
     finally:
         relay.stop()
+
+
+@router.get("/active-pois")
+def api_get_active_pois(db: Session = Depends(get_db)):
+    """활성 맵의 POI 목록 반환 (작업 관리에서 사용)"""
+    active_map = db.query(RobotMap).filter(RobotMap.is_active == True).order_by(RobotMap.id.desc()).first()
+    if not active_map:
+        return []
+    pois = db.query(MapPOI).filter(MapPOI.map_id == active_map.id, MapPOI.is_active == True).all()
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "poi_type": p.poi_type,
+            "world_x": p.world_x,
+            "world_y": p.world_y,
+            "angle": p.angle,
+        }
+        for p in pois
+    ]

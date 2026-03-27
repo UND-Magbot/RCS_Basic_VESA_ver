@@ -22,7 +22,6 @@ class Robot(Base):
     min_battery = Column(Integer, nullable=False, default=20)
     charging_id = Column(Integer, ForeignKey("map_pois.id", ondelete="SET NULL"), nullable=True)
     standby_id = Column(Integer, ForeignKey("map_pois.id", ondelete="SET NULL"), nullable=True)
-    wcs_no = Column(Integer, nullable=True)  # WCS 호기 번호 (1→AMR01, 6→AMR06)
     is_active = Column(Boolean, default=True, nullable=False)  # Soft Delete용
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

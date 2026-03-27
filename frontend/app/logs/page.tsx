@@ -6,9 +6,7 @@ import { SideNav, defaultNavItems } from "../components/shell/SideNav";
 import { LogFilter } from "../components/ui/logs/LogFilter";
 import { LogTable } from "../components/ui/logs/LogTable";
 import type { LogFilterState, LogItem } from "@/lib/types/logs";
-import { LoadingScreen } from "../components/ui/LoadingScreen";
 import { apiFetch } from "@/lib/api";
-import * as XLSX from "xlsx";
 import "./logs.css";
 
 function formatDateTime() {
@@ -130,35 +128,8 @@ export default function LogsPage() {
     setCurrentPage(1);
   };
 
-  const handleDbBackup = () => {
-    window.location.href = `${process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000"}/api/backup/full`;
-  };
-
-  const handleExport = async () => {
-    try {
-      const qs = buildParams(appliedFilters, 0, 500);
-      const res = await apiFetch<{ total: number; items: LogItem[] }>(
-        `/api/logs?${qs}`
-      );
-      const rows = res.items.map((item) => ({
-        "발생 일시": formatCreatedAt(item.created_at),
-        "타입": item.display_category,
-        "IP / 출처": item.robot_name ?? item.source ?? "-",
-        "메세지": item.message,
-        "데이터": item.detail ?? "",
-      }));
-      const ws = XLSX.utils.json_to_sheet(rows);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "로그");
-      XLSX.writeFile(wb, `logs_${new Date().toISOString().slice(0, 10)}.xlsx`);
-    } catch {
-      // ignore export error
-    }
-  };
-
   return (
     <>
-      {isLoading && <LoadingScreen pageName="로그 관리" />}
       <div className="app-shell">
       <TopBar
         dateTime={currentDateTime}
@@ -176,20 +147,6 @@ export default function LogsPage() {
           <div className="logs-page">
             <header className="logs-page__header">
               <h1 className="logs-page__title">로그 관리</h1>
-              <button
-                type="button"
-                className="logs-page__export-btn"
-                onClick={handleExport}
-              >
-                Excel 내보내기
-              </button>
-              <button
-                type="button"
-                className="logs-page__export-btn"
-                onClick={handleDbBackup}
-              >
-                DB 백업
-              </button>
             </header>
 
             <LogFilter

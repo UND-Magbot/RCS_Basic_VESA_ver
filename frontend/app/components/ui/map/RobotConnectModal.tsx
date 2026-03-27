@@ -9,6 +9,7 @@ type RobotItem = {
   sn: string;
   name: string;
   ip_address: string | null;
+  online?: boolean;
 };
 
 export function RobotConnectModal({
@@ -23,13 +24,21 @@ export function RobotConnectModal({
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 모달이 열릴 때 로봇 목록 조회
+  // 모달이 열릴 때 로봇 목록 + 온라인 체크 동시에
   useEffect(() => {
     if (!open) return;
     setLoading(true);
     setError(null);
-    apiFetch<{ total: number; items: RobotItem[] }>("/api/map/robots")
-      .then((data) => setRobots(data.items))
+    Promise.all([
+      apiFetch<{ total: number; items: RobotItem[] }>("/api/map/robots"),
+      apiFetch<{ total: number; items: { SN: string; ONLINE: string }[] }>("/api/robots/live"),
+    ])
+      .then(([mapData, liveData]) => {
+        const onlineSet = new Set(
+          liveData.items.filter((r) => r.ONLINE === "Online").map((r) => r.SN)
+        );
+        setRobots(mapData.items.map((r) => ({ ...r, online: onlineSet.has(r.sn) })));
+      })
       .catch((err) => setError(err.message ?? "로봇 목록을 불러오지 못했습니다."))
       .finally(() => setLoading(false));
   }, [open]);
@@ -81,7 +90,8 @@ export function RobotConnectModal({
 
       <div className="robot-connect__list">
         {loading ? (
-          <div style={{ color: "var(--text-muted)", textAlign: "center", padding: "16px" }}>
+          <div style={{ color: "var(--text-muted)", textAlign: "center", padding: "24px", display: "flex", flexDirection: "column", alignItems: "center", gap: "12px" }}>
+            <div className="robot-connect__spinner" />
             로봇 목록을 불러오는 중...
           </div>
         ) : filtered.length === 0 ? (
@@ -99,7 +109,12 @@ export function RobotConnectModal({
               }
               onClick={() => setSelectedSn(robot.sn)}
             >
-              <span className="robot-connect__item-name">{robot.name}</span>
+              <span
+                className="robot-connect__item-name"
+                style={robot.online ? { color: "var(--color-success)" } : undefined}
+              >
+                {robot.name}
+              </span>
               <span className="robot-connect__item-sn">{robot.sn}</span>
             </button>
           ))

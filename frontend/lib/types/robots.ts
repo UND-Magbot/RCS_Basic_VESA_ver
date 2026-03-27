@@ -15,6 +15,7 @@ export type RobotDevice = {
   power: number | null;
   enable: boolean;
   nickname: string | null;
+  ip: string | null;
   axbotVersion: string | null;
   platform: string | null;
   busiName: string | null;

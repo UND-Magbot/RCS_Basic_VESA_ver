@@ -98,6 +98,7 @@ export default function RobotsPage() {
         power: r["POWER(%)"] ?? null,
         enable: true,
         nickname: r.NICKNAME ?? null,
+        ip: r.IP ?? null,
         axbotVersion: r.AXBOT_VERSION ?? null,
         platform: r.PLATFORM ?? null,
         busiName: null,

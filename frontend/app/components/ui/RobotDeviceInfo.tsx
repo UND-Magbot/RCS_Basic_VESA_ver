@@ -182,9 +182,10 @@ export function RobotDeviceInfo({
           setInitialSpeed(robotSpeed);
         } catch {}
       }
+      showAlert({ title: "완료", message: "설정이 저장되었습니다." });
     } catch (err) {
       console.error("[로봇 상세] 충전 설정 저장 오류:", err);
-      showAlert({ title: "알림", message: "충전 설정 저장에 실패했습니다.", errorCode: "ROBOT-009", errorType: "robot", source: "로봇 상세 > 충전 설정", description: "RobotDeviceInfo — 충전 설정 저장 실패", robotSn: device.sn });
+      showAlert({ title: "알림", message: "설정 저장에 실패했습니다.", errorCode: "ROBOT-009", errorType: "robot", source: "로봇 상세 > 설정 저장", description: "RobotDeviceInfo — 설정 저장 실패", robotSn: device.sn });
     } finally {
       setIsApplying(false);
     }

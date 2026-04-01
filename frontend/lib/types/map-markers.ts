@@ -7,7 +7,7 @@ export type PoiMarkerData = {
   id: string;
   label: string;
   position: MapPixelCoord;
-  type: "workstation" | "charging" | "pickup" | "dropoff" | "jack";
+  type: "workstation" | "charging" | "pickup" | "dropoff" | "jack" | "standby";
   renderKind?: "circle" | "triangle";
   angle?: number;
   dockingRadius?: number;

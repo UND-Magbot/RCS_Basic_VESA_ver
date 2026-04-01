@@ -181,6 +181,15 @@ export function JobStatusPanel() {
                 <div className="job-card__message">{job.message}</div>
                 <div className="job-card__footer">
                   {ip && <span className="job-card__robot-ip">로봇: {ip}</span>}
+                  {(job.status === "waiting_confirm" || job.status === "waiting_confirm_return") && (
+                    <button
+                      className="job-card__confirm-btn"
+                      style={{ background: "linear-gradient(135deg, #5a8ff5, #3b6fd4)", color: "white", border: "none", padding: "6px 16px", borderRadius: 6, cursor: "pointer", fontWeight: 600 }}
+                      onClick={async () => {
+                        await fetch(`${API}/api/robots/remote/confirm/${ip}`, { method: "POST" });
+                      }}
+                    >{job.status === "waiting_confirm_return" ? "복귀" : "출발"}</button>
+                  )}
                   <button
                     className="job-card__stop-btn"
                     onClick={() => handleStopAndDock(ip)}
@@ -205,10 +214,11 @@ export function JobStatusPanel() {
           {todaySchedules.map((s) => {
             const now = new Date();
             const nowHHMM = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
+            const isBefore = s.start_time && nowHHMM < s.start_time.slice(0, 5);
             const isExpired = s.end_time && nowHHMM > s.end_time;
             const isBusy = jobEntries.length > 0;
-            const canRun = !isBusy && !isExpired && s.is_active;
-            const btnLabel = isBusy ? "작업 진행 중" : isExpired ? "시간 종료" : !s.is_active ? "비활성" : "즉시 실행";
+            const canRun = !isBusy && !isExpired && !isBefore && s.is_active;
+            const btnLabel = isBusy ? "작업 진행 중" : isBefore ? "시간 전" : isExpired ? "시간 종료" : !s.is_active ? "비활성" : "즉시 실행";
             return (
               <div key={s.id} className="job-card">
                 <div className="job-card__header">

@@ -71,14 +71,14 @@ type MapItem = {
 
 function mapPoiTypeToMonitorType(
   apiType: string
-): "workstation" | "charging" | "pickup" | "dropoff" | "jack" {
+): "workstation" | "charging" | "pickup" | "dropoff" | "jack" | "standby" {
   switch (apiType) {
     case "charging":
       return "charging";
     case "jack":
       return "jack";
     case "standby":
-      return "workstation";
+      return "standby";
     default:
       return "workstation";
   }
@@ -467,9 +467,9 @@ export function MonitoringClient({ initialDateTime }: Props) {
           dockingRadius: p.dockingRadius ?? undefined,
         };
         // jack POI: rack.specs 크기를 픽셀로 변환
-        if (p.type === "jack" && mapMeta && mapMeta.grid_resolution > 0) {
-          const RACK_W = 0.66; // meters
-          const RACK_D = 0.70;
+        if ((p.type === "jack" || p.type === "standby") && mapMeta && mapMeta.grid_resolution > 0) {
+          const RACK_W = 0.83; // meters
+          const RACK_D = 0.87;
           poiData.rackWidthPx = RACK_W / mapMeta.grid_resolution;
           poiData.rackDepthPx = RACK_D / mapMeta.grid_resolution;
         }

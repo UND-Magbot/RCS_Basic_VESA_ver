@@ -709,18 +709,20 @@ function drawPoiBox(
   counterScale: number,
   angle?: number,
   rackWidthPx?: number,
-  rackDepthPx?: number
+  rackDepthPx?: number,
+  color?: "purple" | "blue"
 ) {
   const w = rackWidthPx ?? 16 * counterScale;
   const d = rackDepthPx ?? 16 * counterScale;
+  const isBlue = color === "blue";
 
   ctx.save();
   ctx.translate(cx, cy);
   if (angle != null) ctx.rotate(-angle + Math.PI / 2);
 
-  // 박스 외곽 (반투명 보라색)
-  ctx.fillStyle = "rgba(168, 85, 247, 0.25)";
-  ctx.strokeStyle = "#a855f7";
+  // 박스 외곽
+  ctx.fillStyle = isBlue ? "rgba(59, 130, 246, 0.25)" : "rgba(168, 85, 247, 0.25)";
+  ctx.strokeStyle = isBlue ? "#3b82f6" : "#a855f7";
   ctx.lineWidth = 1.5 * counterScale;
   ctx.beginPath();
   ctx.rect(-w / 2, -d / 2, w, d);
@@ -729,12 +731,12 @@ function drawPoiBox(
 
   // 4개 다리 (모서리)
   const legSize = 2 * counterScale;
-  ctx.fillStyle = "#7c3aed";
+  ctx.fillStyle = isBlue ? "#2563eb" : "#7c3aed";
   for (const [lx, ly] of [[-w/2, -d/2], [w/2 - legSize, -d/2], [w/2 - legSize, d/2 - legSize], [-w/2, d/2 - legSize]]) {
     ctx.fillRect(lx, ly, legSize, legSize);
   }
 
-  // V자 쉐브론 방향 표시 (박스 안쪽 꽉 차게)
+  // V자 쉐브론 방향 표시
   ctx.strokeStyle = "rgba(255, 255, 255, 0.7)";
   ctx.lineWidth = 1.5 * counterScale;
   ctx.lineCap = "round";
@@ -750,7 +752,8 @@ function drawPoiBox(
   }
 
   ctx.restore();
-  drawMarkerLabel(ctx, cx, cy + d / 2 + 5 * counterScale, label, "#d8b4fe", counterScale, 700);
+  const labelColor = isBlue ? "#93c5fd" : "#d8b4fe";
+  drawMarkerLabel(ctx, cx, cy + d / 2 + 5 * counterScale, label, labelColor, counterScale, 700);
 }
 
 function drawPoiTriangle(
@@ -862,7 +865,9 @@ function drawPois(
     }
 
     if (poi.type === "jack") {
-      drawPoiBox(ctx, p.cx, p.cy, poi.label, counterScale, poi.angle, poi.rackWidthPx, poi.rackDepthPx);
+      drawPoiBox(ctx, p.cx, p.cy, poi.label, counterScale, poi.angle, poi.rackWidthPx, poi.rackDepthPx, "purple");
+    } else if (poi.type === "standby") {
+      drawPoiBox(ctx, p.cx, p.cy, poi.label, counterScale, poi.angle, poi.rackWidthPx, poi.rackDepthPx, "blue");
     } else if (renderKind === "circle") {
       drawPoiCircle(ctx, p.cx, p.cy, poi.label, counterScale);
     } else {
@@ -870,7 +875,7 @@ function drawPois(
     }
 
     // angle 방향 표시 (충전/대기/잭킹 지점 제외)
-    if (poi.angle != null && poi.type !== "charging" && poi.type !== "workstation" && poi.type !== "jack") {
+    if (poi.angle != null && poi.type !== "charging" && poi.type !== "workstation" && poi.type !== "jack" && poi.type !== "standby") {
       drawPoiAngleIndicator(ctx, p.cx, p.cy, poi.angle, counterScale);
     }
   }

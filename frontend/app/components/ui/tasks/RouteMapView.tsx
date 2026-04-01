@@ -83,8 +83,8 @@ export function RouteMapView({ pois, selectedWaypoints, onPoiClick }: Props) {
     // POI 마커 (줌에 반비례하여 크기 유지)
     const s = 1 / zoom;
     const res = mapMeta?.res || 0.05;
-    const rackW = 0.66 / res;
-    const rackD = 0.70 / res;
+    const rackW = 0.83 / res;
+    const rackD = 0.87 / res;
 
     for (const poi of pois) {
       const pos = worldToPixel(poi.world_x, poi.world_y);

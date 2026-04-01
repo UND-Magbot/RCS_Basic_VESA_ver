@@ -131,6 +131,44 @@ def get_next_run_time(task_id: int) -> datetime | None:
     return None
 
 
+def _return_rack_to_standby(robot_ip: str):
+    """마지막 드롭오프 위치에서 랙을 다시 들어서 대기장소(W1)에 내려놓기"""
+    from app.services.jack_service import (
+        create_move, wait_move, jack_up, jack_down,
+        _get_standby_poi, update_job_status, JACK_WAIT_SEC,
+        _interruptible_sleep,
+    )
+
+    standby = _get_standby_poi()
+    if not standby:
+        logger.info("[scheduler] 대기장소 POI 없음, 랙 복귀 생략")
+        return
+
+    try:
+        update_job_status(robot_ip, status="aligning", message="랙 복귀를 위해 잭 올리는 중...")
+
+        # 현재 위치에서 align_with_rack (마지막 드롭오프 위치)
+        # 바로 잭 업 시도
+        jack_up(robot_ip)
+        _interruptible_sleep(robot_ip, JACK_WAIT_SEC)
+
+        # W1으로 이동
+        update_job_status(robot_ip, status="moving", message=f"대기장소({standby['name']})로 랙 복귀 중...")
+        move_id = create_move(robot_ip, "to_unload_point", standby["x"], standby["y"], standby.get("ori", 0))
+        wait_move(robot_ip, move_id, timeout=120)
+
+        # 잭 다운
+        update_job_status(robot_ip, status="jacking_down", message=f"대기장소({standby['name']}) 잭 내리는 중...")
+        jack_down(robot_ip)
+        _interruptible_sleep(robot_ip, JACK_WAIT_SEC)
+
+        logger.info(f"[scheduler] 대기장소 랙 복귀 완료: {standby['name']}")
+    except Exception as e:
+        logger.error(f"[scheduler] 대기장소 랙 복귀 실패: {e}")
+        from app.crud.activity_log import log_activity
+        log_activity("robot", "move_error", f"대기장소 랙 복귀 실패: {str(e)}", source="scheduler")
+
+
 def _return_to_charger(robot_ip: str, wp_list: list[dict]):
     """작업 종료 후 충전소 복귀"""
     # 경로에서 충전소 찾기
@@ -309,7 +347,7 @@ def execute_scheduled_task(task_id: int):
         except Exception:
             return False
 
-    def _run_once() -> dict:
+    def _run_once(skip_standby_pickup=False, skip_standby_return=False) -> dict:
         """1회 실행 + 이력 기록"""
         nonlocal history_id
         # 이력 생성 (반복 시 새 이력)
@@ -332,7 +370,9 @@ def execute_scheduled_task(task_id: int):
         finally:
             db_h.close()
 
-        result = run_route_job(robot_ip, wp_list)
+        result = run_route_job(robot_ip, wp_list,
+                               skip_standby_pickup=skip_standby_pickup,
+                               skip_standby_return=skip_standby_return)
 
         db_h2 = SessionLocal()
         try:
@@ -347,9 +387,13 @@ def execute_scheduled_task(task_id: int):
         return result
 
     # 경로 실행 (end_time까지 반복)
+    has_repeat = bool(end_time_str) and _is_within_end_time()
+
     try:
-        # 첫 실행은 이미 생성된 이력 사용
-        result = run_route_job(robot_ip, wp_list)
+        # 첫 실행: W1 픽업 O, W1 복귀는 반복이면 스킵
+        result = run_route_job(robot_ip, wp_list,
+                               skip_standby_pickup=False,
+                               skip_standby_return=has_repeat)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
@@ -361,14 +405,19 @@ def execute_scheduled_task(task_id: int):
         finally:
             db2.close()
 
-        # end_time 전이면 반복 실행
+        # end_time 전이면 반복 실행 (W1 픽업/복귀 둘 다 스킵)
         while result["status"] == "done" and _is_within_end_time():
             logger.info(f"[scheduler] Task {task_id}: 완료 후 재실행 (end_time={end_time_str}까지)")
-            result = _run_once()
+            # 마지막인지 미리 알 수 없으므로 W1 복귀 스킵
+            result = _run_once(skip_standby_pickup=True, skip_standby_return=True)
             if result["status"] != "done":
                 break
 
-        # 모든 작업 완료 후 충전소 복귀
+        # 반복 종료 후 마지막 드롭오프에서 W1으로 랙 복귀
+        if has_repeat and result["status"] == "done":
+            _return_rack_to_standby(robot_ip)
+
+        # 충전소 복귀
         _return_to_charger(robot_ip, wp_list)
 
     except Exception as e:

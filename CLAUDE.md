@@ -85,15 +85,15 @@
 ```json
 {
   "rack.specs": [{
-    "width": 0.66,
-    "depth": 0.70,
-    "margin": [0, 0, 0, 0],
+    "width": 0.83,
+    "depth": 0.87,
+    "margin": [0.05, 0.05, 0.05, 0.05],
     "alignment": "center",
     "alignment_margin_back": 0.02,
-    "extra_leg_offset": 0.015,
-    "leg_shape": "square",
-    "leg_size": 0.03,
-    "foot_radius": 0.0,
+    "extra_leg_offset": 0.0,
+    "leg_shape": "other",
+    "leg_size": 0.05,
+    "foot_radius": 0.025,
     "cargo_to_jack_front_edge_min_distance": 0.05
   }]
 }

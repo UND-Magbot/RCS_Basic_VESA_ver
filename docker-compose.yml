@@ -7,7 +7,7 @@ services:
       - "8002:8002"
     environment:
       - TZ=Asia/Seoul
-      - DB_HOST=192.168.0.21
+      - DB_HOST=${SERVER_IP:-192.168.0.44}
       - DB_PORT=${DB_PORT:-3306}
       - DB_USER=${DB_USER:-root}
       - DB_PASSWORD=${DB_PASSWORD:-1234}
@@ -27,7 +27,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.0.21:8002}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://${SERVER_IP:-192.168.0.44}:8002}
     ports:
       - "3002:3002"
     depends_on:

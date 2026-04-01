@@ -873,11 +873,11 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
             new_firewall = existing_firewall
             logger.info(f"[sync] 가상벽 DB에 없음 → 기존 {len(existing_firewall)}개 보존")
 
-        # 3) jack 타입 POI → Shelves Point overlay 생성 (type=34, subtype=rack)
+        # 3) jack/standby 타입 POI → Shelves Point overlay 생성 (type=34, subtype=rack)
         new_shelves_points = []
         jack_pois = db.query(MapPOI).filter(
             MapPOI.map_id == map_id,
-            MapPOI.poi_type == "jack",
+            MapPOI.poi_type.in_(["jack", "standby"]),
             MapPOI.is_active == True,
         ).all()
         if jack_pois:
@@ -927,14 +927,14 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
         try:
             _rack_specs = {
                 "rack.specs": [{
-                    "width": 0.66, "depth": 0.70,
-                    "margin": [0, 0, 0, 0],
+                    "width": 0.83, "depth": 0.87,
+                    "margin": [0.05, 0.05, 0.05, 0.05],
                     "alignment": "center",
                     "alignment_margin_back": 0.02,
-                    "extra_leg_offset": 0.015,
+                    "extra_leg_offset": 0.0,
                     "leg_shape": "square",
                     "leg_size": 0.03,
-                    "foot_radius": 0.0,
+                    "foot_radius": 0.025,
                     "cargo_to_jack_front_edge_min_distance": 0.05,
                 }]
             }
@@ -1215,12 +1215,12 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
     if fw_polys:
         fw_features = _build_firewall_overlay_features(fw_polys)
 
-    # DB에서 jack POI → Shelves Point overlay (type=34, subtype=rack)
+    # DB에서 jack/standby POI → Shelves Point overlay (type=34, subtype=rack)
     shelves_features = []
     from app.models.map import MapPOI
     jack_pois = db.query(MapPOI).filter(
         MapPOI.map_id == map_id,
-        MapPOI.poi_type == "jack",
+        MapPOI.poi_type.in_(["jack", "standby"]),
         MapPOI.is_active == True,
     ).all()
     import math as _math2
@@ -1305,11 +1305,11 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
                 f"http://{robot_ip}:8090/system/settings/user",
                 headers={"Authorization": f"Secret {target_secret}"},
                 json={"rack.specs": [{
-                    "width": 0.66, "depth": 0.70,
-                    "margin": [0, 0, 0, 0], "alignment": "center",
-                    "alignment_margin_back": 0.02, "extra_leg_offset": 0.015,
-                    "leg_shape": "square", "leg_size": 0.03,
-                    "foot_radius": 0.0, "cargo_to_jack_front_edge_min_distance": 0.05,
+                    "width": 0.83, "depth": 0.87,
+                    "margin": [0.05, 0.05, 0.05, 0.05], "alignment": "center",
+                    "alignment_margin_back": 0.02, "extra_leg_offset": 0.0,
+                    "leg_shape": "other", "leg_size": 0.05,
+                    "foot_radius": 0.025, "cargo_to_jack_front_edge_min_distance": 0.05,
                 }]}, timeout=5,
             )
             logger.info(f"[sync-overlays] rack.specs 자동 설정 완료 → {robot_ip}")

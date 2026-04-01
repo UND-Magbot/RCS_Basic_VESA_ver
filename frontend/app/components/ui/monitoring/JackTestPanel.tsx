@@ -27,6 +27,8 @@ const STATUS_LABELS: Record<string, string> = {
   moving: "이동 중",
   charging: "충전 도킹 중",
   waiting: "대기 중",
+  waiting_confirm: "출발 대기",
+  waiting_confirm_return: "복귀 대기",
   returning: "복귀 중",
   done: "완료",
   error: "오류",
@@ -71,8 +73,13 @@ export function JackTestPanel({ liveRobots }: Props) {
       const res = await fetch(`${API}/api/tasks/manual-run-pois`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ robot_id: robotId, pickup_poi_id: pickupId, dropoff_poi_id: dropoffId }),
+        body: JSON.stringify({ robot_id: robotId, pickup_poi_id: pickupId, dropoff_poi_id: dropoffId, manual_confirm: true }),
       });
+      if (res.status === 409) {
+        setCurrentJob({ job_id: "", status: "error", message: "로봇이 이미 작업 중입니다" });
+        setIsStarting(false);
+        return;
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const result = await res.json();
       const histId = result.history_id;
@@ -81,6 +88,18 @@ export function JackTestPanel({ liveRobots }: Props) {
       if (pollingRef.current) clearInterval(pollingRef.current);
       pollingRef.current = setInterval(async () => {
         try {
+          // 1) jack_service 실시간 상태 조회
+          if (robotIp) {
+            const jobRes = await fetch(`${API}/api/robots/job-status/${robotIp}`);
+            if (jobRes.ok) {
+              const job = await jobRes.json();
+              if (job.status && job.status !== "idle") {
+                setCurrentJob({ job_id: String(histId), status: job.status, message: job.message || STATUS_LABELS[job.status] || job.status });
+                return;
+              }
+            }
+          }
+          // 2) 작업 종료 후 이력에서 최종 상태 확인
           const hist = await apiFetch<{ total: number; items: any[] }>(`/api/tasks/history/all?limit=5`);
           const h = hist.items.find((item: any) => item.id === histId);
           if (h) {
@@ -214,6 +233,15 @@ export function JackTestPanel({ liveRobots }: Props) {
             {STATUS_LABELS[currentJob.status] || currentJob.status}
           </div>
           <div className="jack-test-panel__status-msg">{currentJob.message}</div>
+          {(currentJob.status === "waiting_confirm" || currentJob.status === "waiting_confirm_return") && robotIp && (
+            <button
+              className="btn btn--primary jack-test-panel__btn"
+              style={{ marginTop: 8 }}
+              onClick={async () => {
+                await fetch(`${API}/api/robots/remote/confirm/${robotIp}`, { method: "POST" });
+              }}
+            >{currentJob.status === "waiting_confirm_return" ? "복귀" : "출발"}</button>
+          )}
         </div>
       )}
     </div>

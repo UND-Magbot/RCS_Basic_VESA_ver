@@ -419,8 +419,8 @@ export function MapCanvas({
                 ) : poi.type === "jack" ? (
                   (() => {
                     const res = mapMeta?.grid_resolution || 0.05;
-                    const rackW = 0.66 / res;
-                    const rackD = 0.70 / res;
+                    const rackW = 0.83 / res;
+                    const rackD = 0.87 / res;
                     const angle = poi.angle != null ? -poi.angle * (180 / Math.PI) + 90 : 0;
                     return (
                       <g transform={`translate(${poi.x}, ${poi.y}) rotate(${angle})`}>
@@ -465,7 +465,7 @@ export function MapCanvas({
                 )}
                 <text
                   x={poi.x}
-                  y={poi.y - (poi.type === "jack" ? (0.70 / (mapMeta?.grid_resolution || 0.05)) / 2 + 3 : 6)}
+                  y={poi.y - (poi.type === "jack" ? (0.87 / (mapMeta?.grid_resolution || 0.05)) / 2 + 3 : 6)}
                   className="map-poi__label"
                 >
                   {poi.name}

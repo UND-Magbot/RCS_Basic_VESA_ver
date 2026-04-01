@@ -60,6 +60,48 @@ _stop_flags: dict[str, bool] = {}
 # 실행 중인 작업 상태 (robot_ip → job info)
 _job_status: dict[str, dict] = {}
 
+# 수동 확인 대기 (robot_ip → threading.Event)
+import threading as _threading
+_confirm_events: dict[str, _threading.Event] = {}
+
+
+def _get_standby_poi() -> dict | None:
+    """DB에서 현재 활성 맵의 standby POI(W1) 조회"""
+    from app.database import SessionLocal
+    from app.models.map import MapPOI, RobotMap
+    db = SessionLocal()
+    try:
+        active_map = db.query(RobotMap).filter(RobotMap.is_active == True).order_by(RobotMap.id.desc()).first()
+        if not active_map:
+            return None
+        poi = db.query(MapPOI).filter(
+            MapPOI.map_id == active_map.id,
+            MapPOI.poi_type == "standby",
+            MapPOI.is_active == True,
+        ).first()
+        if poi and poi.world_x is not None:
+            return {"name": poi.name, "x": poi.world_x, "y": poi.world_y, "ori": poi.angle or 0}
+        return None
+    finally:
+        db.close()
+
+
+def wait_for_confirm(robot_ip: str, timeout: int = 300) -> bool:
+    """사용자 확인 버튼을 기다림. True=확인됨, False=타임아웃"""
+    evt = _threading.Event()
+    _confirm_events[robot_ip] = evt
+    result = evt.wait(timeout=timeout)
+    _confirm_events.pop(robot_ip, None)
+    return result
+
+
+def confirm_robot(robot_ip: str):
+    """사용자가 확인 버튼을 눌렀을 때 호출"""
+    evt = _confirm_events.get(robot_ip)
+    if evt:
+        evt.set()
+        logger.info(f"[jack_service] confirm received for {robot_ip}")
+
 
 def stop_robot_job(robot_ip: str):
     """특정 로봇의 진행 중인 작업에 중지 플래그 설정 + 상태 제거"""
@@ -276,6 +318,9 @@ def run_route_job(
     ip: str,
     waypoints: list[dict],
     on_status: Optional[Callable[[str, str], None]] = None,
+    manual_confirm: bool = False,
+    skip_standby_pickup: bool = False,
+    skip_standby_return: bool = False,
 ) -> dict:
     """경로 기반 작업 실행
     waypoints: [{"name", "x", "y", "ori", "waypoint_type", "poi_type", "wait_sec"}, ...]
@@ -307,6 +352,26 @@ def run_route_job(
     log_activity("robot", "task_start", f"작업 시작: {route_names}", source="jack_service")
 
     try:
+        # ── 시작: 대기장소(W1)에서 랙 픽업 (첫 회차만) ──
+        standby_poi = _get_standby_poi()
+        if standby_poi and not skip_standby_pickup:
+            sname = standby_poi["name"]
+            _check_stop(ip)
+            _notify("aligning", f"대기장소({sname})에서 랙 픽업 중...", 0)
+            move_id = create_move(ip, "align_with_rack", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
+            result = wait_move(ip, move_id, timeout=120)
+            if result["state"] == "succeeded":
+                _notify("jacking_up", f"대기장소({sname}) 잭 올리는 중...", 0)
+                jack_up(ip)
+                _interruptible_sleep(ip, JACK_WAIT_SEC)
+                jacked_up = True
+            else:
+                msg = f"대기장소({sname}) 랙 픽업 실패: {result.get('fail_message', '')}"
+                log_activity("robot", "move_error", msg, source="jack_service")
+                _notify("error", msg)
+                clear_job_status(ip)
+                return {"status": "error", "message": msg}
+
         for i, wp in enumerate(waypoints):
             name = wp["name"]
             wtype = wp["waypoint_type"]
@@ -314,19 +379,58 @@ def run_route_job(
             wait_sec = wp.get("wait_sec", 0)
 
             if wtype == "pickup":
-                # 픽업: align_with_rack → jack_up
-                _notify("aligning", f"[{i+1}/{total_steps}] {name} 랙 정렬 이동 중...", i+1)
-                move_id = create_move(ip, "align_with_rack", wp["x"], wp["y"], wp.get("ori", 0))
-                result = wait_move(ip, move_id, timeout=120)
-                if result["state"] != "succeeded":
-                    msg = f"{name} 랙 정렬 실패: {result.get('fail_message', '')}"
-                    log_activity("robot", "move_error", msg, source="jack_service")
-                    return {"status": "error", "message": msg}
+                if jacked_up:
+                    # 잭 올린 상태 → 픽업 위치로 이동 → 잭 다운 → 물건 올림 → 잭 업
+                    _notify("moving_to_dropoff", f"[{i+1}/{total_steps}] {name} 랙 배달 중...", i+1)
+                    move_id = create_move(ip, "to_unload_point", wp["x"], wp["y"], wp.get("ori", 0))
+                    result = wait_move(ip, move_id, timeout=120)
+                    if result["state"] != "succeeded":
+                        msg = f"{name} 이동 실패: {result.get('fail_message', '')}"
+                        log_activity("robot", "move_error", msg, source="jack_service")
+                        return {"status": "error", "message": msg}
 
-                _notify("jacking_up", f"{name} 잭 올리는 중...", i+1)
-                jack_up(ip)
-                _interruptible_sleep(ip, JACK_WAIT_SEC)
-                jacked_up = True
+                    _notify("jacking_down", f"{name} 잭 내리는 중...", i+1)
+                    jack_down(ip)
+                    _interruptible_sleep(ip, JACK_WAIT_SEC)
+                    jacked_up = False
+
+                    # 수동: 출발 버튼 누르면 자동으로 잭 업 → 출발 / 자동: wait_sec 대기
+                    if manual_confirm:
+                        _notify("waiting_confirm", f"{name} 물건 적재 후 출발 버튼을 눌러주세요", i+1)
+                        if not wait_for_confirm(ip, timeout=300):
+                            return {"status": "error", "message": "출발 확인 타임아웃 (5분)"}
+                        _check_stop(ip)
+                    elif wait_sec > 0:
+                        _notify("waiting", f"{name} 대기 중 ({wait_sec}초)...", i+1)
+                        _interruptible_sleep(ip, wait_sec)
+
+                    # 잭 업 → 바로 출발 (출발 대기 없음)
+                    _notify("aligning", f"{name} 랙 재정렬 중...", i+1)
+                    move_id = create_move(ip, "align_with_rack", wp["x"], wp["y"], wp.get("ori", 0))
+                    result = wait_move(ip, move_id, timeout=120)
+                    if result["state"] != "succeeded":
+                        msg = f"{name} 랙 재정렬 실패: {result.get('fail_message', '')}"
+                        log_activity("robot", "move_error", msg, source="jack_service")
+                        return {"status": "error", "message": msg}
+
+                    _notify("jacking_up", f"{name} 잭 올리는 중...", i+1)
+                    jack_up(ip)
+                    _interruptible_sleep(ip, JACK_WAIT_SEC)
+                    jacked_up = True
+                else:
+                    # 잭이 내려간 상태 → align_with_rack로 랙 픽업
+                    _notify("aligning", f"[{i+1}/{total_steps}] {name} 랙 정렬 이동 중...", i+1)
+                    move_id = create_move(ip, "align_with_rack", wp["x"], wp["y"], wp.get("ori", 0))
+                    result = wait_move(ip, move_id, timeout=120)
+                    if result["state"] != "succeeded":
+                        msg = f"{name} 랙 정렬 실패: {result.get('fail_message', '')}"
+                        log_activity("robot", "move_error", msg, source="jack_service")
+                        return {"status": "error", "message": msg}
+
+                    _notify("jacking_up", f"{name} 잭 올리는 중...", i+1)
+                    jack_up(ip)
+                    _interruptible_sleep(ip, JACK_WAIT_SEC)
+                    jacked_up = True
 
                 if wait_sec > 0:
                     _notify("waiting", f"{name} 대기 중 ({wait_sec}초)...", i+1)
@@ -383,6 +487,44 @@ def run_route_job(
                 if wait_sec > 0:
                     _notify("waiting", f"{name} 대기 중 ({wait_sec}초)...", i+1)
                     _interruptible_sleep(ip, wait_sec)
+
+        # 마지막 드롭오프 후 랙을 대기장소(W1)로 이동 (마지막 회차만)
+        if jacked_up is False and not skip_standby_return:
+            _check_stop(ip)
+            standby_poi = _get_standby_poi()
+            if standby_poi:
+                sname = standby_poi["name"]
+
+                # 복귀 버튼 대기 → 누르면 잭 업 + W1 이동 + 잭 다운 자동 진행
+                if manual_confirm:
+                    _notify("waiting_confirm_return", "작업 완료 — 복귀 버튼을 눌러주세요", total_steps)
+                    if not wait_for_confirm(ip, timeout=300):
+                        return {"status": "error", "message": "복귀 확인 타임아웃 (5분)"}
+                    _check_stop(ip)
+
+                # 드롭오프 위치에서 잭 업 → 바로 대기장소 이동
+                _notify("aligning", f"대기장소 이동을 위해 랙 재정렬 중...", total_steps)
+                last_dropoff = None
+                for wp in reversed(waypoints):
+                    if wp["waypoint_type"] == "dropoff":
+                        last_dropoff = wp
+                        break
+                if last_dropoff:
+                    move_id = create_move(ip, "align_with_rack", last_dropoff["x"], last_dropoff["y"], last_dropoff.get("ori", 0))
+                    result = wait_move(ip, move_id, timeout=120)
+                    if result["state"] == "succeeded":
+                        _notify("jacking_up", "대기장소 이동을 위해 잭 올리는 중...", total_steps)
+                        jack_up(ip)
+                        _interruptible_sleep(ip, JACK_WAIT_SEC)
+
+                        # 대기장소로 이동
+                        _notify("moving", f"대기장소({sname})로 이동 중...", total_steps)
+                        move_id = create_move(ip, "to_unload_point", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
+                        result = wait_move(ip, move_id, timeout=120)
+
+                        _notify("jacking_down", f"대기장소({sname}) 잭 내리는 중...", total_steps)
+                        jack_down(ip)
+                        _interruptible_sleep(ip, JACK_WAIT_SEC)
 
         _notify("done", f"완료: {route_names}", total_steps)
         clear_job_status(ip)

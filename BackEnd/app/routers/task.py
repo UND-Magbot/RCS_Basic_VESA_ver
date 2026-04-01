@@ -3,17 +3,20 @@
 - 경로(Route) CRUD
 - 스케줄 작업 CRUD + 즉시 실행
 - 실행 이력 조회
+- 태블릿 전용 페이지
 """
 import logging
 import threading
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.task import TaskRoute, TaskRouteWaypoint, ScheduledTask, TaskHistory
-from app.models.map import MapPOI
+from app.models.map import MapPOI, RobotMap
 from app.models.robot import Robot
 from app.schemas.task import (
     TaskRouteCreate, TaskRouteUpdate, TaskRouteResponse, WaypointResponse,
@@ -303,6 +306,11 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
     if not robot or not robot.ip_address:
         raise HTTPException(404, "로봇을 찾을 수 없습니다")
 
+    # 로봇이 이미 작업 중인지 체크
+    from app.services.jack_service import get_job_status
+    if get_job_status(robot.ip_address):
+        raise HTTPException(409, "로봇이 이미 작업 중입니다")
+
     route = db.query(TaskRoute).filter(TaskRoute.id == data.route_id).first()
     if not route:
         raise HTTPException(404, "경로를 찾을 수 없습니다")
@@ -377,6 +385,7 @@ class ManualRunPoisRequest(_BaseModel):
     robot_id: int
     pickup_poi_id: int
     dropoff_poi_id: int
+    manual_confirm: bool = False
 
 @router.post("/manual-run-pois")
 def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db)):
@@ -384,6 +393,11 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
     robot = db.query(Robot).filter(Robot.id == data.robot_id).first()
     if not robot or not robot.ip_address:
         raise HTTPException(404, "로봇을 찾을 수 없습니다")
+
+    # 로봇이 이미 작업 중인지 체크
+    from app.services.jack_service import get_job_status
+    if get_job_status(robot.ip_address):
+        raise HTTPException(409, "로봇이 이미 작업 중입니다")
 
     pickup = db.query(MapPOI).filter(MapPOI.id == data.pickup_poi_id, MapPOI.is_active == True).first()
     dropoff = db.query(MapPOI).filter(MapPOI.id == data.dropoff_poi_id, MapPOI.is_active == True).first()
@@ -415,11 +429,13 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
     history_id = history.id
     robot_ip = robot.ip_address
 
+    use_confirm = data.manual_confirm
+
     def _run():
         from app.services.jack_service import run_route_job
         from app.services.scheduler import _return_to_charger
         from app.database import SessionLocal
-        result = run_route_job(robot_ip, wp_list)
+        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
@@ -604,3 +620,32 @@ def api_stats_route_duration(
         }
         for r in rows
     ]
+
+
+# ══════════════════════════════════════
+# 태블릿 전용 페이지
+# ══════════════════════════════════════
+
+_TABLET_TEMPLATE = Path(__file__).parent.parent / "templates" / "tablet.html"
+
+@router.get("/tablet/{robot_id}", response_class=HTMLResponse)
+def tablet_page(robot_id: int, db: Session = Depends(get_db)):
+    """태블릿 수동 배차 웹 페이지"""
+    robot = db.query(Robot).filter(Robot.id == robot_id).first()
+    robot_name = robot.name if robot else f"Robot #{robot_id}"
+    robot_ip = robot.ip_address if robot else ""
+
+    active_map = db.query(RobotMap).filter(RobotMap.is_active == True).order_by(RobotMap.id.desc()).first()
+    pois = db.query(MapPOI).filter(
+        MapPOI.map_id == active_map.id if active_map else -1,
+        MapPOI.is_active == True,
+        MapPOI.poi_type == "jack",
+    ).all()
+    poi_options = "".join(f'<option value="{p.id}">{p.name}</option>' for p in pois)
+
+    html = _TABLET_TEMPLATE.read_text(encoding="utf-8")
+    html = html.replace("{{ROBOT_NAME}}", robot_name)
+    html = html.replace("{{ROBOT_ID}}", str(robot_id))
+    html = html.replace("{{ROBOT_IP}}", robot_ip)
+    html = html.replace("{{POI_OPTIONS}}", poi_options)
+    return HTMLResponse(content=html)

@@ -44,6 +44,55 @@ def _get_robot_list(db: Session) -> list[dict]:
     robots = db.query(Robot).filter(Robot.is_active == True, Robot.ip_address != None).all()
     return [{"ip": r.ip_address, "secret": DEFAULT_SECRET} for r in robots if r.ip_address]
 
+@router.get("/quick-status/{robot_ip}")
+def api_get_robot_status(robot_ip: str):
+    """단일 로봇 상태 빠른 조회 (태블릿용)"""
+    import requests as req
+    result = {"online": False, "run_state": "OFFLINE", "battery": "-"}
+    try:
+        r = req.get(f"http://{robot_ip}:8090/chassis/status", timeout=2)
+        if r.status_code == 200:
+            result["online"] = True
+            data = r.json()
+            mode = data.get("control_mode", "auto")
+            if data.get("emergency_stop_pressed"):
+                result["run_state"] = "ESTOP"
+            elif mode == "remote":
+                result["run_state"] = "REMOTE"
+            else:
+                try:
+                    mr = req.get(f"http://{robot_ip}:8090/chassis/moves/current", timeout=2)
+                    if mr.status_code == 200 and mr.json().get("state") == "moving":
+                        result["run_state"] = "MOVING"
+                    else:
+                        result["run_state"] = "IDLE"
+                except Exception:
+                    result["run_state"] = "IDLE"
+    except Exception:
+        return result
+    # 배터리 (WebSocket 1회 조회)
+    try:
+        import websocket as _ws, json as _json, time as _time
+        ws = _ws.create_connection(f"ws://{robot_ip}:8090/ws/v2/topics", timeout=2)
+        ws.send(_json.dumps({"enable_topic": "/battery_state"}))
+        deadline = _time.time() + 2
+        while _time.time() < deadline:
+            raw = ws.recv()
+            pkt = _json.loads(raw)
+            if pkt.get("topic") == "/battery_state":
+                pct = pkt.get("percentage") or pkt.get("level") or pkt.get("power_percent")
+                if pct is not None:
+                    pct = float(pct)
+                    if pct <= 1.0:
+                        pct = pct * 100
+                    result["battery"] = f"{int(pct)}%"
+                break
+        ws.close()
+    except Exception:
+        pass
+    return result
+
+
 @router.get("/live")
 def api_get_robots_live(db: Session = Depends(get_db)):
     """DB 로봇 목록을 기반으로 실시간 API 정보를 병합하여 반환.
@@ -588,6 +637,14 @@ def api_stop_all(robot_ip: str):
     return {"ok": True, "message": "모든 작업이 정지되었습니다"}
 
 
+@router.post("/remote/confirm/{robot_ip}")
+def api_confirm_robot(robot_ip: str):
+    """잭 업 후 출발 확인"""
+    from app.services.jack_service import confirm_robot
+    confirm_robot(robot_ip)
+    return {"ok": True, "message": "출발 확인됨"}
+
+
 @router.post("/remote/dock/{robot_ip}")
 def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
     """충전소로 복귀"""
@@ -637,5 +694,20 @@ def api_jack_control(robot_ip: str, action: str):
             timeout=5,
         )
         return {"status": r.status_code}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remote/shutdown/{robot_ip}")
+def api_shutdown_robot(robot_ip: str):
+    """로봇 전원 종료"""
+    import requests as req
+    try:
+        r = req.post(
+            f"http://{robot_ip}:8090/services/baseboard/shutdown",
+            json={"target": "main_power_supply", "reboot": False},
+            timeout=5,
+        )
+        return {"status": r.status_code, "message": "로봇 종료 명령 전송"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

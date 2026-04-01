@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>UND RCS - {{ROBOT_NAME}}</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+.corner-btn { display:none !important; }
+body {
+  font-family: -apple-system, 'Noto Sans KR', sans-serif;
+  background: #0a1628; color: #e0e0e0;
+  height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  -webkit-user-select: none; user-select: none;
+}
+
+/* ── 헤더 ── */
+.header {
+  background: #0f1d32; padding: 14px 20px;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.header__title { font-size: 18px; font-weight: 700; color: #5a8ff5; }
+.header__robot { font-size: 13px; color: rgba(255,255,255,0.5); }
+.header__status { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.header__right { display: flex; align-items: center; gap: 10px; }
+.header__btn { background: none; border: 1px solid rgba(255,255,255,0.2); border-radius: 8px; color: rgba(255,255,255,0.6); width: 36px; height: 36px; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.header__btn:active { background: rgba(255,255,255,0.1); }
+.header__btn--power { color: #f56565; border-color: rgba(245,101,101,0.3); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #3de0a4; }
+.dot--off { background: #f56565; }
+
+/* ── 메인 ── */
+.main { flex:1; display:flex; flex-direction:column; padding:16px; gap:12px; overflow-y:auto; }
+
+/* ── 카드 ── */
+.card { background:#162538; border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:16px; }
+.card__title { font-size:14px; font-weight:600; margin-bottom:12px; color:rgba(255,255,255,0.8); }
+
+/* ── 폼 ── */
+.form-row { display:flex; gap:10px; margin-bottom:12px; }
+.form-col { flex:1; }
+.form-col label { font-size:11px; color:rgba(255,255,255,0.45); margin-bottom:4px; display:block; }
+.form-col select {
+  width:100%; padding:11px; background:#1e2d4a;
+  border:1px solid rgba(255,255,255,0.12); border-radius:8px;
+  color:#e0e0e0; font-size:15px; appearance:none;
+}
+
+/* ── 버튼 ── */
+.btn {
+  width:100%; padding:13px; border:none; border-radius:10px;
+  font-size:15px; font-weight:600; cursor:pointer; transition:all 0.15s;
+}
+.btn:active { transform:scale(0.97); }
+.btn--primary { background:linear-gradient(135deg,#5a8ff5,#3b6fd4); color:white; }
+.btn--primary:disabled { background:#2a3a50; color:rgba(255,255,255,0.3); cursor:not-allowed; transform:none; }
+.btn--danger { background:linear-gradient(135deg,#f56565,#e53e3e); color:white; }
+.btn--teal { background:linear-gradient(135deg,#36dfc8,#2bb5a0); color:white; }
+.btn--purple { background:linear-gradient(135deg,#a78bfa,#7c3aed); color:white; }
+.btn--amber { background:linear-gradient(135deg,#fbbf24,#d97706); color:#1a1a1a; }
+.btn--ghost { background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15); color:#e0e0e0; }
+.btn--sm { padding:10px; font-size:13px; }
+
+/* ── 상태 ── */
+.status { text-align:center; padding:8px 0; }
+.status__state { font-size:22px; font-weight:700; margin-bottom:4px; }
+.status__state--run { color:#5a8ff5; }
+.status__state--err { color:#f56565; }
+.status__state--ok { color:#36dfc8; }
+.status__state--wait { color:#fbbf24; }
+.status__msg { font-size:13px; color:rgba(255,255,255,0.5); }
+.status__route { font-size:13px; color:rgba(255,255,255,0.6); margin-top:4px; }
+.progress { height:5px; background:rgba(255,255,255,0.08); border-radius:3px; margin-top:8px; overflow:hidden; }
+.progress__bar { height:100%; background:#5a8ff5; border-radius:3px; transition:width 0.4s; }
+.status__buttons { margin-top:12px; display:flex; gap:8px; }
+.status__buttons .btn { flex:1; }
+
+/* ── 스케줄 ── */
+.sched-item {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:10px 12px; background:rgba(255,255,255,0.03); border-radius:8px; margin-bottom:8px;
+}
+.sched-item__info { flex:1; }
+.sched-item__name { font-size:14px; font-weight:600; }
+.sched-item__detail { font-size:11px; color:rgba(255,255,255,0.4); margin-top:2px; }
+.sched-item__actions { display:flex; gap:6px; }
+.sched-item__actions .btn { width:auto; padding:8px 14px; font-size:12px; }
+.sched-toggle { width:40px; height:22px; border-radius:11px; border:none; cursor:pointer; position:relative; transition:background 0.2s; }
+.sched-toggle--on { background:#5a8ff5; }
+.sched-toggle--off { background:#2a3a50; }
+.sched-toggle::after { content:''; position:absolute; top:3px; width:16px; height:16px; border-radius:50%; background:white; transition:left 0.2s; }
+.sched-toggle--on::after { left:21px; }
+.sched-toggle--off::after { left:3px; }
+
+/* ── 알림 ── */
+.toast {
+  position:fixed; top:0; left:0; right:0; z-index:300;
+  background:linear-gradient(135deg,#36dfc8,#2bb5a0);
+  color:white; padding:12px; text-align:center; font-size:14px; font-weight:600;
+  transform:translateY(-100%); transition:transform 0.3s;
+}
+.toast--show { transform:translateY(0); }
+
+/* ── 모달 ── */
+.modal-overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:200;
+  display:none; align-items:flex-end; justify-content:center;
+}
+.modal-overlay--show { display:flex; }
+.modal {
+  background:#162538; border-top:1px solid rgba(255,255,255,0.12);
+  border-radius:20px 20px 0 0; width:100%; max-height:85vh;
+  overflow-y:auto; padding:20px 20px 32px;
+}
+.modal__header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+.modal__title { font-size:17px; font-weight:700; }
+.modal__close { background:none; border:none; color:rgba(255,255,255,0.5); font-size:26px; cursor:pointer; padding:4px 8px; }
+.modal__section { margin-bottom:16px; }
+.modal__section-title { font-size:12px; font-weight:600; color:rgba(255,255,255,0.4); margin-bottom:10px; text-transform:uppercase; letter-spacing:0.5px; }
+
+/* ── 제어 그리드 ── */
+.ctrl-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.ctrl-grid .btn { font-size:14px; padding:12px; }
+
+/* ── 방향키 ── */
+.dpad { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; max-width:240px; margin:0 auto; }
+.dpad .btn { padding:16px; font-size:20px; width:auto; }
+.btn--stop-dir { background:#f56565; color:white; }
+
+/* ── 모드 ── */
+.mode-row { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; padding:10px 14px; background:rgba(255,255,255,0.04); border-radius:8px; }
+.mode-label { font-size:14px; }
+.mode-badge { font-size:12px; padding:4px 10px; border-radius:20px; font-weight:600; cursor:pointer; border:none; }
+.mode-badge--auto { background:rgba(90,143,245,0.2); color:#5a8ff5; }
+.mode-badge--remote { background:rgba(245,101,101,0.2); color:#f56565; }
+
+/* ── 이력 ── */
+.hist-item { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.05); font-size:13px; }
+.hist--ok { color:#3de0a4; }
+.hist--fail { color:#f56565; }
+
+.idle-msg { text-align:center; padding:20px 0; color:rgba(255,255,255,0.25); font-size:14px; }
+.empty-msg { text-align:center; padding:16px; color:rgba(255,255,255,0.25); font-size:13px; }
+</style>
+</head>
+<body>
+
+<!-- 헤더 -->
+<div class="header">
+  <div>
+    <div class="header__title">UND RCS</div>
+    <div class="header__robot">{{ROBOT_NAME}}</div>
+  </div>
+  <div class="header__right">
+    <div class="header__status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">확인 중...</span>
+    </div>
+    <button class="header__btn header__btn--power" id="shutdownBtn" onclick="shutdownRobot()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg></button>
+    <button class="header__btn" onclick="if(window.Android)Android.openSettings();">⚙</button>
+    <button class="header__btn" onclick="if(window.Android)Android.goHome();">⌂</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- 메인 -->
+<div class="main">
+
+  <!-- 작업 상태 -->
+  <div class="card" id="statusCard" style="display:none;">
+    <div class="status">
+      <div class="status__state" id="jobState">-</div>
+      <div class="status__msg" id="jobDetail"></div>
+      <div class="status__route" id="jobRoute"></div>
+      <div class="progress"><div class="progress__bar" id="jobProgress" style="width:0%"></div></div>
+    </div>
+    <div class="status__buttons">
+      <button class="btn btn--primary" id="confirmBtn" onclick="confirmGo()" style="display:none;">출발</button>
+      <button class="btn btn--danger" id="stopBtn" onclick="stopTask()" style="display:none;">정지</button>
+    </div>
+  </div>
+
+  <!-- idle -->
+  <div id="idleMsg" class="idle-msg">대기 중</div>
+
+  <!-- 수동 배차 -->
+  <div class="card">
+    <div class="card__title">수동 배차</div>
+    <div class="form-row">
+      <div class="form-col">
+        <label>픽업</label>
+        <select id="pickupSelect">{{POI_OPTIONS}}</select>
+      </div>
+      <div class="form-col">
+        <label>드롭오프</label>
+        <select id="dropoffSelect">{{POI_OPTIONS}}</select>
+      </div>
+    </div>
+    <button class="btn btn--primary" id="startBtn" onclick="startTask()">작업 시작</button>
+  </div>
+
+  <!-- 제어 버튼 -->
+  <button class="btn btn--ghost" onclick="openModal('controlModal')">제어 패널</button>
+
+  <!-- 등록된 스케줄 -->
+  <div class="card">
+    <div class="card__title">등록된 스케줄</div>
+    <div id="scheduleList"><div class="empty-msg">불러오는 중...</div></div>
+  </div>
+
+</div>
+
+<!-- 제어 모달 -->
+<div class="modal-overlay" id="controlModal" onclick="if(event.target===this)closeModal('controlModal')">
+  <div class="modal">
+    <div class="modal__header">
+      <div class="modal__title">제어 패널</div>
+      <button class="modal__close" onclick="closeModal('controlModal')">&times;</button>
+    </div>
+
+    <div class="modal__section">
+      <div class="modal__section-title">제어 모드</div>
+      <div class="mode-row">
+        <span class="mode-label">모드</span>
+        <button class="mode-badge mode-badge--auto" id="modeBtn" onclick="toggleMode()">자동</button>
+      </div>
+    </div>
+
+    <!-- 자동 모드 제어 -->
+    <div class="modal__section" id="autoControls">
+      <div class="modal__section-title">자동 모드 제어</div>
+      <div class="ctrl-grid">
+        <button class="btn btn--purple" onclick="jackControl('jack_up')">잭 업</button>
+        <button class="btn btn--purple" onclick="jackControl('jack_down')">잭 다운</button>
+        <button class="btn btn--amber" onclick="cancelMove()">이동 취소</button>
+        <button class="btn btn--teal" onclick="dockRobot()">충전소 복귀</button>
+      </div>
+    </div>
+
+    <!-- 원격 모드 제어 -->
+    <div class="modal__section" id="remoteControls" style="display:none;">
+      <div class="modal__section-title">원격 조종</div>
+      <div style="margin-bottom:10px;">
+        <div class="ctrl-grid">
+          <button class="btn btn--purple" onclick="jackControl('jack_up')">잭 업</button>
+          <button class="btn btn--purple" onclick="jackControl('jack_down')">잭 다운</button>
+        </div>
+      </div>
+      <div class="dpad">
+        <div></div>
+        <button class="btn btn--ghost" ontouchstart="twistStart(0.3,0)" ontouchend="twistStop()" onmousedown="twistStart(0.3,0)" onmouseup="twistStop()">▲</button>
+        <div></div>
+        <button class="btn btn--ghost" ontouchstart="twistStart(0,0.5)" ontouchend="twistStop()" onmousedown="twistStart(0,0.5)" onmouseup="twistStop()">◀</button>
+        <button class="btn btn--stop-dir" onclick="twistStop()">■</button>
+        <button class="btn btn--ghost" ontouchstart="twistStart(0,-0.5)" ontouchend="twistStop()" onmousedown="twistStart(0,-0.5)" onmouseup="twistStop()">▶</button>
+        <div></div>
+        <button class="btn btn--ghost" ontouchstart="twistStart(-0.3,0)" ontouchend="twistStop()" onmousedown="twistStart(-0.3,0)" onmouseup="twistStop()">▼</button>
+        <div></div>
+      </div>
+    </div>
+
+    <div class="modal__section">
+      <div class="modal__section-title">실행 이력</div>
+      <div id="historyList" style="max-height:30vh; overflow-y:auto;"><div class="empty-msg">불러오는 중...</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+const ROBOT_ID = {{ROBOT_ID}};
+const ROBOT_IP = "{{ROBOT_IP}}";
+
+/* ── 유틸 ── */
+function toast(msg, ms) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('toast--show');
+  setTimeout(() => el.classList.remove('toast--show'), ms || 3000);
+}
+function openModal(id) { document.getElementById(id).classList.add('modal-overlay--show'); }
+function closeModal(id) {
+  document.getElementById(id).classList.remove('modal-overlay--show');
+  if (currentMode === 'remote') toggleMode();
+}
+
+/* ── 배차 ── */
+async function startTask() {
+  const pickup = document.getElementById('pickupSelect').value;
+  const dropoff = document.getElementById('dropoffSelect').value;
+  if (!pickup || !dropoff) return;
+  document.getElementById('startBtn').disabled = true;
+  try {
+    const res = await fetch(API+'/api/tasks/manual-run-pois', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({robot_id:ROBOT_ID, pickup_poi_id:+pickup, dropoff_poi_id:+dropoff, manual_confirm:true})
+    });
+    if (res.ok) toast('작업을 시작합니다');
+    else if (res.status===409) { toast('로봇이 이미 작업 중입니다',4000); document.getElementById('startBtn').disabled=false; }
+    else { toast('시작 실패',4000); document.getElementById('startBtn').disabled=false; }
+  } catch(e) { toast('연결 오류',4000); document.getElementById('startBtn').disabled=false; }
+}
+async function stopTask() {
+  await fetch(API+'/api/robots/remote/stop-all/'+ROBOT_IP,{method:'POST'}).catch(()=>{});
+  await fetch(API+'/api/robots/remote/dock/'+ROBOT_IP,{method:'POST'}).catch(()=>{});
+  toast('정지 → 충전소 복귀 중');
+}
+async function confirmGo() {
+  await fetch(API+'/api/robots/remote/confirm/'+ROBOT_IP,{method:'POST'}).catch(()=>{});
+  toast('출발합니다'); document.getElementById('confirmBtn').style.display='none';
+}
+
+/* ── 빠른 제어 ── */
+async function jackControl(a) { await fetch(API+'/api/robots/remote/jack/'+ROBOT_IP+'/'+a,{method:'POST'}).catch(()=>{}); toast(a==='jack_up'?'잭 올리는 중...':'잭 내리는 중...'); }
+async function cancelMove() { await fetch(API+'/api/robots/remote/cancel-move/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('이동 취소됨'); }
+async function dockRobot() { await fetch(API+'/api/robots/remote/dock/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('충전소 복귀'); }
+async function shutdownRobot() {
+  if (document.getElementById('shutdownBtn').disabled) return;
+  if (!confirm('로봇을 종료하시겠습니까?')) return;
+  try {
+    await fetch(API+'/api/robots/remote/shutdown/'+ROBOT_IP,{method:'POST'});
+    toast('로봇 종료 명령 전송');
+  } catch(e) { toast('종료 실패',3000); }
+}
+
+/* ── 원격 조종 ── */
+let currentMode='auto', twistInterval=null;
+async function toggleMode() {
+  const m = currentMode==='auto'?'remote':'auto';
+  try {
+    await fetch(API+'/api/robots/remote/control-mode/'+ROBOT_IP,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:m})});
+    currentMode=m;
+    const btn=document.getElementById('modeBtn');
+    btn.textContent=m==='auto'?'자동':'원격';
+    btn.className='mode-badge '+(m==='auto'?'mode-badge--auto':'mode-badge--remote');
+    document.getElementById('autoControls').style.display=m==='auto'?'':'none';
+    document.getElementById('remoteControls').style.display=m==='remote'?'':'none';
+    toast(m==='auto'?'자동 모드':'원격 모드');
+  } catch(e) { toast('모드 전환 실패',3000); }
+}
+function twistStart(lv,av){twistStop();sendTwist(lv,av);twistInterval=setInterval(()=>sendTwist(lv,av),200);}
+function twistStop(){if(twistInterval){clearInterval(twistInterval);twistInterval=null;}sendTwist(0,0);}
+function sendTwist(lv,av){fetch(API+'/api/robots/remote/twist/'+ROBOT_IP,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({linear_velocity:lv,angular_velocity:av})}).catch(()=>{});}
+
+/* ── 스케줄 ── */
+async function runSchedule(id) {
+  try {
+    const res = await fetch(API+'/api/tasks/schedule/'+id+'/run',{method:'POST'});
+    if (res.ok) toast('스케줄 실행 시작');
+    else if (res.status===409) toast('로봇이 이미 작업 중입니다',4000);
+    else toast('실행 실패',4000);
+  } catch(e) { toast('연결 오류',4000); }
+}
+async function toggleSchedule(id, el) {
+  try {
+    const res = await fetch(API+'/api/tasks/schedule/'+id+'/toggle',{method:'POST'});
+    if (res.ok) { const d=await res.json(); el.className='sched-toggle '+(d.is_active?'sched-toggle--on':'sched-toggle--off'); toast(d.is_active?'스케줄 활성화':'스케줄 비활성화'); }
+  } catch(e) { toast('변경 실패',3000); }
+}
+
+const REPEAT_MAP = {once:'1회',daily:'매일',weekly:'주간'};
+const DAY_MAP = {mon:'월',tue:'화',wed:'수',thu:'목',fri:'금',sat:'토',sun:'일'};
+
+function renderSchedules(items, isBusy) {
+  const el = document.getElementById('scheduleList');
+  if (!items.length) { el.innerHTML='<div class="empty-msg">등록된 스케줄이 없습니다</div>'; return; }
+  const now = new Date();
+  const nowHHMM = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  el.innerHTML = items.map(s => {
+    const days = s.repeat_days ? s.repeat_days.split(',').map(d=>DAY_MAP[d]||d).join(' ') : '';
+    const time = s.start_time ? s.start_time.slice(0,5) : '';
+    const endTime = s.end_time ? s.end_time.slice(0,5) : '';
+    const detail = (REPEAT_MAP[s.repeat_type]||s.repeat_type) + (days?' '+days:'') + (time?' '+time:'') + (endTime?' ~ '+endTime:'');
+    const isBefore = time && nowHHMM < time;
+    const isExpired = endTime && nowHHMM > endTime;
+    const canRun = s.is_active && !isBefore && !isExpired && !isBusy;
+    const btnLabel = isBusy ? '진행 중' : isBefore ? '시간 전' : isExpired ? '종료' : !s.is_active ? '비활성' : '실행';
+    return `<div class="sched-item">
+      <div class="sched-item__info">
+        <div class="sched-item__name">${s.name}</div>
+        <div class="sched-item__detail">${s.route_name||'-'} | ${detail}</div>
+      </div>
+      <div class="sched-item__actions">
+        <button class="sched-toggle ${s.is_active?'sched-toggle--on':'sched-toggle--off'}" onclick="toggleSchedule(${s.id},this)"></button>
+        <button class="btn ${canRun?'btn--primary':'btn--ghost'} btn--sm" onclick="${canRun?'runSchedule('+s.id+')':''}" style="width:auto;${canRun?'':'opacity:0.4;cursor:not-allowed;'}">${btnLabel}</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+/* ── 폴링 ── */
+const STATE_MAP = {
+  started:'작업 시작', aligning:'랙 정렬 중', jacking_up:'잭 올리는 중',
+  jacking_down:'잭 내리는 중', moving_to_dropoff:'드롭오프 이동 중',
+  moving:'이동 중', waiting:'대기 중', charging:'충전소 이동 중',
+  returning:'충전소 복귀 중', error:'오류 발생', waiting_confirm:'출발 대기', waiting_confirm_return:'복귀 대기',
+};
+
+async function pollStatus() {
+  try {
+    // 작업 상태
+    const res = await fetch(API+'/api/robots/job-status');
+    const jobs = await res.json();
+    const job = jobs[ROBOT_IP];
+    const statusCard=document.getElementById('statusCard');
+    const idleMsg=document.getElementById('idleMsg');
+    const startBtn=document.getElementById('startBtn');
+
+    const shutdownBtn=document.getElementById('shutdownBtn');
+    if (job && job.status && job.status!=='done') {
+      statusCard.style.display=''; idleMsg.style.display='none'; startBtn.disabled=true;
+      shutdownBtn.disabled=true; shutdownBtn.style.opacity='0.3';
+      document.getElementById('stopBtn').style.display='';
+      const isWaitConfirm = job.status==='waiting_confirm' || job.status==='waiting_confirm_return';
+      document.getElementById('confirmBtn').style.display=isWaitConfirm?'':'none';
+      document.getElementById('confirmBtn').textContent=job.status==='waiting_confirm_return'?'복귀':'출발';
+      const el=document.getElementById('jobState');
+      el.textContent=STATE_MAP[job.status]||job.status;
+      el.className='status__state '+(job.status==='error'?'status__state--err':(job.status==='waiting_confirm'||job.status==='waiting_confirm_return')?'status__state--wait':job.status==='returning'?'status__state--ok':'status__state--run');
+      document.getElementById('jobDetail').textContent=job.message||'';
+      document.getElementById('jobRoute').textContent=job.route||'';
+      const pct=job.total_steps>0?Math.round((job.current_step/job.total_steps)*100):0;
+      document.getElementById('jobProgress').style.width=pct+'%';
+    } else {
+      statusCard.style.display='none'; idleMsg.style.display=''; startBtn.disabled=false;
+      shutdownBtn.disabled=false; shutdownBtn.style.opacity='1';
+    }
+
+    // 로봇 상태 (로봇에 직접 조회 — /api/robots/live가 느려서 우회)
+    try {
+      if(!ROBOT_IP) throw 'no ip';
+      const dr=await fetch(API+'/api/robots/quick-status/'+ROBOT_IP,{signal:AbortSignal.timeout(4000)}); const dd=await dr.json();
+      const on=dd.online===true;
+      document.getElementById('statusDot').className='dot'+(on?'':' dot--off');
+      document.getElementById('statusText').textContent=on?(dd.run_state||'Online')+' | '+(dd.battery||'-'):'오프라인';
+    } catch(e){
+      document.getElementById('statusDot').className='dot dot--off';
+      document.getElementById('statusText').textContent='연결 실패';
+    }
+
+    // 스케줄
+    const jobBusy = !!(job && job.status && job.status!=='done');
+    const sr=await fetch(API+'/api/tasks?limit=20'); const sd=await sr.json();
+    renderSchedules(sd.items||[], jobBusy);
+
+    // 이력
+    const hr=await fetch(API+'/api/tasks/history/all?limit=10'); const hd=await hr.json();
+    const hl=document.getElementById('historyList');
+    if(hd.items&&hd.items.length){hl.innerHTML=hd.items.map(h=>`<div class="hist-item"><span>${h.route_name||h.task_name||'-'}</span><span class="${h.status==='succeeded'?'hist--ok':'hist--fail'}">${h.status==='succeeded'?'성공':h.status==='failed'?'실패':h.status}</span></div>`).join('');}
+    else{hl.innerHTML='<div class="empty-msg">이력 없음</div>';}
+  } catch(e){}
+}
+
+pollStatus();
+setInterval(pollStatus, 3000);
+</script>
+</body>
+</html>

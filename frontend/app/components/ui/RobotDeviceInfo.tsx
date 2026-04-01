@@ -155,6 +155,7 @@ export function RobotDeviceInfo({
     if (!device || isApplying) return;
     setIsApplying(true);
     try {
+      // 충전 설정
       const res = await fetch(
         `${process.env.NEXT_PUBLIC_API_URL}/api/robots/sn/${encodeURIComponent(device.sn)}/min-battery`,
         {
@@ -168,28 +169,30 @@ export function RobotDeviceInfo({
         setInitialMinBattery(data.min_battery);
         setInitialChargingId(data.charging_id ?? null);
         setInitialStandbyId(data.standby_id ?? null);
-      } else {
-        showAlert({ title: "알림", message: "충전 설정 저장에 실패했습니다.", errorCode: "ROBOT-009", errorType: "robot", source: "로봇 상세 > 충전 설정", description: "RobotDeviceInfo — 충전 설정 저장 실패", robotSn: device.sn });
       }
-      // 속도 변경
-      if (device.ip && robotSpeed !== initialSpeed) {
-        try {
-          await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/speed/${device.ip}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ max_forward_velocity: robotSpeed }),
-          });
-          setInitialSpeed(robotSpeed);
-        } catch {}
-      }
-      showAlert({ title: "완료", message: "설정이 저장되었습니다." });
     } catch (err) {
       console.error("[로봇 상세] 충전 설정 저장 오류:", err);
-      showAlert({ title: "알림", message: "설정 저장에 실패했습니다.", errorCode: "ROBOT-009", errorType: "robot", source: "로봇 상세 > 설정 저장", description: "RobotDeviceInfo — 설정 저장 실패", robotSn: device.sn });
+    }
+    // 속도 변경 (충전 설정과 독립적으로 항상 실행)
+    if (device.ip) {
+      try {
+        await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/speed/${device.ip}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ max_forward_velocity: robotSpeed }),
+        });
+        setInitialSpeed(robotSpeed);
+      } catch (err) {
+        console.error("[로봇 상세] 속도 저장 오류:", err);
+      }
+    }
+    try {
+      showAlert({ title: "완료", message: "설정이 저장되었습니다." });
+    } catch {
     } finally {
       setIsApplying(false);
     }
-  }, [device, minBattery, chargingId, standbyId, isApplying]);
+  }, [device, minBattery, chargingId, standbyId, robotSpeed, isApplying]);
 
   if (!device) return null;
 

@@ -585,37 +585,47 @@ def api_cancel_move(robot_ip: str):
 
 
 @router.get("/speed/{robot_ip}")
-def api_get_speed(robot_ip: str):
-    """로봇 속도 조회"""
+def api_get_speed(robot_ip: str, db: Session = Depends(get_db)):
+    """로봇 속도 조회 (DB 우선, 없으면 로봇에서)"""
     import requests as req
+    robot = db.query(Robot).filter(Robot.ip_address == robot_ip, Robot.is_active == True).first()
+    speed = robot.max_speed if robot and robot.max_speed else 1.2
     try:
-        r = req.get(f"http://{robot_ip}:8090/robot-params", timeout=5)
+        r = req.get(f"http://{robot_ip}:8090/robot-params", timeout=3)
         params = r.json()
         return {
-            "max_forward_velocity": params.get("/wheel_control/max_forward_velocity", 1.2),
+            "max_forward_velocity": speed,
             "max_backward_velocity": abs(params.get("/wheel_control/max_backward_velocity", -0.5)),
             "max_angular_velocity": params.get("/wheel_control/max_angular_velocity", 1.2),
         }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        return {
+            "max_forward_velocity": speed,
+            "max_backward_velocity": 0.5,
+            "max_angular_velocity": 1.2,
+        }
 
 
 @router.post("/speed/{robot_ip}")
 def api_set_speed(robot_ip: str, body: dict, db: Session = Depends(get_db)):
-    """로봇 속도 변경 (로봇 전송 + DB 저장)"""
+    """로봇 속도 변경 (DB 저장 + 로봇 전송)"""
     import requests as req
+    speed = body.get("max_forward_velocity", 1.2)
+    # 1) DB 먼저 저장
+    robot = db.query(Robot).filter(Robot.ip_address == robot_ip, Robot.is_active == True).first()
+    import logging
+    logging.getLogger(__name__).info(f"[speed] robot_ip={robot_ip}, found={robot is not None}, speed={speed}")
+    if robot:
+        robot.max_speed = speed
+        db.commit()
+        logging.getLogger(__name__).info(f"[speed] DB saved: {robot.max_speed}")
+    # 2) 로봇에 전송 (실패해도 DB는 이미 저장됨)
     try:
-        speed = body.get("max_forward_velocity", 1.2)
         req.post(f"http://{robot_ip}:8090/robot-params",
                  json={"/wheel_control/max_forward_velocity": speed}, timeout=5)
-        # DB에 저장
-        robot = db.query(Robot).filter(Robot.ip_address == robot_ip, Robot.is_active == True).first()
-        if robot:
-            robot.max_speed = speed
-            db.commit()
-        return {"ok": True, "max_forward_velocity": speed}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        pass
+    return {"ok": True, "max_forward_velocity": speed}
 
 
 @router.post("/remote/stop-all/{robot_ip}")

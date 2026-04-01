@@ -95,12 +95,12 @@ body {
 
 /* ── 알림 ── */
 .toast {
-  position:fixed; top:0; left:0; right:0; z-index:300;
-  background:linear-gradient(135deg,#36dfc8,#2bb5a0);
-  color:white; padding:12px; text-align:center; font-size:14px; font-weight:600;
-  transform:translateY(-100%); transition:transform 0.3s;
+  position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(100px); z-index:300;
+  background:rgba(0,0,0,0.85); border-radius:10px;
+  color:white; padding:12px 24px; text-align:center; font-size:14px; font-weight:600;
+  transition:transform 0.3s; white-space:nowrap;
 }
-.toast--show { transform:translateY(0); }
+.toast--show { transform:translateX(-50%) translateY(0); }
 
 /* ── 모달 ── */
 .modal-overlay {
@@ -315,12 +315,19 @@ async function confirmGo() {
 async function jackControl(a) { await fetch(API+'/api/robots/remote/jack/'+ROBOT_IP+'/'+a,{method:'POST'}).catch(()=>{}); toast(a==='jack_up'?'잭 올리는 중...':'잭 내리는 중...'); }
 async function cancelMove() { await fetch(API+'/api/robots/remote/cancel-move/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('이동 취소됨'); }
 async function dockRobot() { await fetch(API+'/api/robots/remote/dock/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('충전소 복귀'); }
+let shutdownPending = false;
 async function shutdownRobot() {
   if (document.getElementById('shutdownBtn').disabled) return;
-  if (!confirm('로봇을 종료하시겠습니까?')) return;
+  if (!shutdownPending) {
+    shutdownPending = true;
+    toast('한번 더 누르면 로봇이 종료됩니다', 3000);
+    setTimeout(() => { shutdownPending = false; }, 3000);
+    return;
+  }
+  shutdownPending = false;
   try {
     await fetch(API+'/api/robots/remote/shutdown/'+ROBOT_IP,{method:'POST'});
-    toast('로봇 종료 명령 전송');
+    toast('로봇이 15초 후 종료됩니다');
   } catch(e) { toast('종료 실패',3000); }
 }
 

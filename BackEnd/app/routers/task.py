@@ -370,8 +370,9 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
                 db2.commit()
         finally:
             db2.close()
-        # 작업 완료 후 충전소 복귀
-        _return_to_charger(robot_ip, wp_list)
+        # 성공 시에만 충전소 복귀
+        if result["status"] == "done":
+            _return_to_charger(robot_ip, wp_list)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
@@ -446,8 +447,9 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
                 db2.commit()
         finally:
             db2.close()
-        # 작업 완료 후 충전소 복귀
-        _return_to_charger(robot_ip, wp_list)
+        # 성공 시에만 충전소 복귀
+        if result["status"] == "done":
+            _return_to_charger(robot_ip, wp_list)
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()

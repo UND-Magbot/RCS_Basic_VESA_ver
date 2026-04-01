@@ -174,10 +174,71 @@
 - ~~로봇 리스트 페이지네이션 (5대 단위)~~
 - ~~로봇 이동 경로 표시 (현재 위치 → 목적지 직선 + 목적지 마커, 로봇별 색상)~~
 
+### 태블릿/수동배차 (완료)
+- ~~태블릿 UI 전면 재구성 (수동배차 + 작업상태 메인, 제어패널 모달)~~
+- ~~태블릿 빠른 제어 (잭 업/다운, 이동 취소, 충전소 복귀, 원격 조종)~~
+- ~~태블릿 스케줄 목록 + 즉시 실행/토글~~
+- ~~태블릿 로봇 상태 빠른 조회 API (/quick-status)~~
+- ~~태블릿 로봇 종료 API (/remote/shutdown)~~
+- ~~태블릿 홈/설정 버튼 헤더 이동~~
+- ~~수동배차 출발/복귀 버튼 분리 (waiting_confirm_return)~~
+- ~~잭 업 후 바로 출발 (중간 출발 대기 제거)~~
+- ~~복귀 버튼 누르면 잭 업 → W1 이동 → 잭 다운 자동~~
+- ~~스케줄 시간 범위 밖 실행 버튼 비활성화~~
+- ~~작업 진행 중 실행/종료 버튼 비활성화~~
+
+### S600 랙 지원 (완료)
+- ~~rack.specs: width=0.83, depth=0.87, leg_shape=other, leg_size=0.05~~
+- ~~foot_radius=0.025, margin=[0.05,0.05,0.05,0.05], hasFixedLegs=false~~
+- ~~Shelves Point yaw +180도 보정~~
+- ~~프론트엔드 랙 마커 크기 0.83x0.87~~
+
+### 버그 수정 (완료)
+- ~~_get_standby_poi() 현재 맵 필터 추가 (이전 맵 POI 좌표 사용 버그)~~
+- ~~로봇 목록에 ip 필드 매핑 누락 수정~~
+- ~~속도 저장 버그 수정 (DB 먼저 저장, GET은 DB에서 조회, useCallback 의존성)~~
+- ~~로봇 설정 적용 후 저장 완료 모달 추가~~
+
+### 서버 배포 (완료)
+- ~~Docker Compose 배포 (백엔드 + 프론트엔드)~~
+- ~~docker-compose SERVER_IP 환경변수화 (.env)~~
+- ~~로봇 속도 DB 저장 및 서버 시작 시 자동 적용~~
+
 ### 프론트엔드 UI (미완료)
 - 맵핑 시작 시 로봇 미연결 안내창
 - 맵 저장 완료 후 해당 맵 자동 표시
 - 영역 드롭다운 최신 선택
+
+## 배포 가이드
+
+### Docker 배포 (서버)
+```bash
+cd ~/UND_RCS_Basic
+cat > .env << 'EOF'
+SERVER_IP=서버IP
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=1234
+DB_NAME=rcs_basic_db
+NEXT_PUBLIC_API_URL=http://서버IP:8002
+EOF
+docker-compose up -d --build
+```
+
+### IP 변경 시
+1. `.env`의 `SERVER_IP`와 `NEXT_PUBLIC_API_URL` 수정
+2. `docker-compose down && docker rmi und_rcs_basic_frontend && docker-compose build --no-cache frontend && docker-compose up -d`
+3. 태블릿 앱 설정에서 서버 주소 변경
+
+### DB 마이그레이션
+```sql
+ALTER TABLE robots ADD COLUMN max_speed FLOAT DEFAULT 1.2;
+```
+
+### 접속 주소
+- 웹: `http://서버IP:3002`
+- 백엔드 API: `http://서버IP:8002`
+- 태블릿: 앱 설정 → 서버 주소 `http://서버IP:8002`, 로봇 ID 확인
 
 ## 업무일지 양식
 ```

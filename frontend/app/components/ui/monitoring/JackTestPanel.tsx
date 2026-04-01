@@ -20,18 +20,21 @@ type Props = {
 
 const STATUS_LABELS: Record<string, string> = {
   pending: "대기 중",
+  started: "작업 시작",
   aligning: "랙 정렬 중",
   jacking_up: "잭 올리는 중",
-  moving_to_dropoff: "드롭오프 이동 중",
   jacking_down: "잭 내리는 중",
+  moving_to_dropoff: "드롭오프 이동 중",
   moving: "이동 중",
   charging: "충전 도킹 중",
   waiting: "대기 중",
   waiting_confirm: "출발 대기",
   waiting_confirm_return: "복귀 대기",
-  returning: "복귀 중",
+  returning: "충전소 복귀 중",
   done: "완료",
   error: "오류",
+  failed: "실패",
+  running: "진행 중",
 };
 
 export function JackTestPanel({ liveRobots }: Props) {
@@ -126,6 +129,7 @@ export function JackTestPanel({ liveRobots }: Props) {
     currentJob != null &&
     currentJob.status !== "done" &&
     currentJob.status !== "error" &&
+    currentJob.status !== "failed" &&
     currentJob.status !== "";
 
   const statusColor =

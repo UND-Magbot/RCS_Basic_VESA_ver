@@ -601,13 +601,18 @@ def api_get_speed(robot_ip: str):
 
 
 @router.post("/speed/{robot_ip}")
-def api_set_speed(robot_ip: str, body: dict):
-    """로봇 속도 변경"""
+def api_set_speed(robot_ip: str, body: dict, db: Session = Depends(get_db)):
+    """로봇 속도 변경 (로봇 전송 + DB 저장)"""
     import requests as req
     try:
         speed = body.get("max_forward_velocity", 1.2)
         req.post(f"http://{robot_ip}:8090/robot-params",
                  json={"/wheel_control/max_forward_velocity": speed}, timeout=5)
+        # DB에 저장
+        robot = db.query(Robot).filter(Robot.ip_address == robot_ip, Robot.is_active == True).first()
+        if robot:
+            robot.max_speed = speed
+            db.commit()
         return {"ok": True, "max_forward_velocity": speed}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

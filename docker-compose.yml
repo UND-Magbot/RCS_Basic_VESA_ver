@@ -27,7 +27,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://${SERVER_IP:-192.168.0.44}:8002}
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://192.168.0.44:8002}
     ports:
       - "3002:3002"
     depends_on:

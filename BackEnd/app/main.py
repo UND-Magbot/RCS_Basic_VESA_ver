@@ -22,10 +22,33 @@ from app.services.scheduler import init_scheduler, shutdown_scheduler
 import app.models  # noqa: F401
 
 
+def _apply_saved_speeds():
+    """서버 시작 시 DB에 저장된 속도를 로봇에 적용"""
+    import requests
+    from app.database import SessionLocal
+    from app.models.robot import Robot
+    db = SessionLocal()
+    try:
+        robots = db.query(Robot).filter(Robot.is_active == True, Robot.ip_address != None, Robot.max_speed != None).all()
+        for r in robots:
+            try:
+                requests.post(
+                    f"http://{r.ip_address}:8090/robot-params",
+                    json={"/wheel_control/max_forward_velocity": r.max_speed},
+                    timeout=3,
+                )
+                logging.getLogger(__name__).info(f"[startup] 속도 적용: {r.name} → {r.max_speed} m/s")
+            except Exception:
+                logging.getLogger(__name__).warning(f"[startup] 속도 적용 실패: {r.name} ({r.ip_address})")
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     # 서버 시작 시 DB + 테이블 자동 생성
     init_db()
+    _apply_saved_speeds()
     init_scheduler()
     yield
     shutdown_scheduler()

@@ -1047,13 +1047,11 @@ export function MonitoringClient({ initialDateTime }: Props) {
             }}
           >
             <section className={mapMode === "3d" ? "monitoring-map is-3d" : "monitoring-map"}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <BusinessSelectBox
-                  businesses={businessesForSelectBox}
-                  selectedId={`${selectedBusiness}:${selectedArea}`}
-                  onChange={handleBusinessAreaChange}
-                />
-                {selectedArea && apiRobotsFull.length > 0 && (
+              <BusinessSelectBox
+                businesses={businessesForSelectBox}
+                selectedId={`${selectedBusiness}:${selectedArea}`}
+                onChange={handleBusinessAreaChange}
+                extraButton={selectedArea && apiRobotsFull.length > 0 ? (
                   <button
                     className="btn btn--ghost"
                     style={{ fontSize: 13, whiteSpace: "nowrap", padding: "4px 10px" }}
@@ -1079,8 +1077,8 @@ export function MonitoringClient({ initialDateTime }: Props) {
                       } catch { showAlert({ title: "층 전환", message: "연결 오류" }); }
                     }}
                   >층 전환</button>
-                )}
-              </div>
+                ) : undefined}
+              />
               {isLoading ? (
                 <div className="monitoring-map__loading">
                   <div className="spinner" />

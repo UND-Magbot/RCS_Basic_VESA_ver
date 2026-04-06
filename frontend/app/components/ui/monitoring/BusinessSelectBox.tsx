@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Business } from "@/lib/types/robots";
 import "./BusinessSelectBox.css";
 
@@ -8,9 +8,10 @@ type Props = {
   businesses: Business[];
   selectedId: string;
   onChange: (businessId: string) => void;
+  extraButton?: ReactNode;
 };
 
-export function BusinessSelectBox({ businesses, selectedId, onChange }: Props) {
+export function BusinessSelectBox({ businesses, selectedId, onChange, extraButton }: Props) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -47,7 +48,7 @@ export function BusinessSelectBox({ businesses, selectedId, onChange }: Props) {
   };
 
   return (
-    <div className="biz-select" ref={wrapRef}>
+    <div className="biz-select" ref={wrapRef} style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <button
         type="button"
         className="biz-select__trigger"
@@ -86,6 +87,8 @@ export function BusinessSelectBox({ businesses, selectedId, onChange }: Props) {
           ))}
         </ul>
       )}
+
+      {extraButton}
     </div>
   );
 }

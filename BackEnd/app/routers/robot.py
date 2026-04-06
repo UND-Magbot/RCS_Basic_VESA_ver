@@ -521,6 +521,10 @@ def api_switch_floor(robot_id: int, body: dict, db: Session = Depends(get_db)):
             import logging
             logging.getLogger(__name__).warning(f"[switch-floor] 초기 위치 설정 실패: {e}")
 
+    # 기본 영역 업데이트 (새로고침해도 이 맵 유지)
+    import app.routers.map as _map_mod
+    _map_mod._current_area_id = int(area_id)
+
     log_activity("robot", "switch_floor",
                  f"층 전환: {robot.name} → area_id={area_id} (맵: {area_map.name})",
                  robot_id=robot_id, source="api_switch_floor")

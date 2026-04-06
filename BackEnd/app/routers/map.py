@@ -763,14 +763,16 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
 
 
 DEFAULT_AREA_ID = 21
+_current_area_id: int | None = None  # 층 전환 시 변경되는 현재 영역 ID
 
 @router.get("/default-map")
 def api_get_default_map(db: Session = Depends(get_db)):
-    """지정된 기본 영역(DEFAULT_AREA_ID)의 최신 맵 반환 (모니터링 페이지 기본값용)"""
+    """현재 선택된 영역 또는 기본 영역의 최신 맵 반환 (모니터링 페이지 기본값용)"""
     try:
+        area_id = _current_area_id or DEFAULT_AREA_ID
         latest = (
             db.query(RobotMap)
-            .filter(RobotMap.area_id == DEFAULT_AREA_ID, RobotMap.is_active == True)
+            .filter(RobotMap.area_id == area_id, RobotMap.is_active == True)
             .order_by(RobotMap.updated_at.desc())
             .first()
         )

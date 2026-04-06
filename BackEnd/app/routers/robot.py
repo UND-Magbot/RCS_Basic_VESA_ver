@@ -507,19 +507,13 @@ def api_switch_floor(robot_id: int, body: dict, db: Session = Depends(get_db)):
     except req.exceptions.RequestException as e:
         raise HTTPException(500, f"맵 전환 실패: {str(e)}")
 
-    # 충전소 좌표로 초기 위치 설정 (SLAM inactive 방지)
-    if charging:
-        try:
-            req.post(
-                f"http://{robot_ip}:8090/chassis/pose",
-                json={"position": [charging.world_x, charging.world_y, 0], "ori": charging.angle or 0},
-                timeout=5,
-            )
-            import logging
-            logging.getLogger(__name__).info(f"[switch-floor] 초기 위치 설정: {charging.name} ({charging.world_x}, {charging.world_y})")
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"[switch-floor] 초기 위치 설정 실패: {e}")
+    # LiDAR 위치 자동 탐색
+    try:
+        req.post(f"http://{robot_ip}:8090/services/start_global_positioning",
+                 json={}, timeout=5)
+        logger.info(f"[switch-floor] LiDAR 위치 자동 탐색 시작")
+    except Exception as e:
+        logger.warning(f"[switch-floor] LiDAR 위치 탐색 실패: {e}")
 
     # 기본 영역 업데이트 (새로고침해도 이 맵 유지)
     import app.routers.map as _map_mod

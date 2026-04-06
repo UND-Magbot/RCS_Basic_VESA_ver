@@ -740,7 +740,7 @@ export default function MapPage() {
 
       // 충전소: 로봇 도킹 위치에서 yaw 반대 방향 0.3m 뒤 = 충전기 위치
       // 일반/잭킹 POI: 로봇 현재 위치 그대로 사용
-      const DOCKING_OFFSET = 0.3;
+      const DOCKING_OFFSET = 0.2;
       const angle = robotPose.ori;
       const worldX = isCharging
         ? robotPose.pos[0] - DOCKING_OFFSET * Math.cos(angle)

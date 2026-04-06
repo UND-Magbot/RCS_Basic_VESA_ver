@@ -253,6 +253,30 @@ def cancel_current_move(ip: str) -> dict:
 
 JACK_WAIT_SEC = 10  # 잭 업/다운 고정 대기 시간(초)
 JACK_IDLE_TIMEOUT = 30  # 잭 다운 후 로봇 idle 대기 최대 시간
+ALIGN_MAX_RETRIES = 3  # align_with_rack 재시도 횟수
+
+
+def align_with_retry(ip: str, x: float, y: float, ori: float = 0,
+                     retries: int = ALIGN_MAX_RETRIES) -> dict:
+    """align_with_rack 실패 시 뒤로 빠져나온 후 재시도.
+    잭 다운 직후 로봇이 랙 바로 아래에 있으면 LiDAR가 다리를 감지 못해 실패할 수 있음.
+    standard 이동으로 빠져나온 후 다시 접근하면 성공률이 높아짐."""
+    for attempt in range(retries):
+        _check_stop(ip)
+        move_id = create_move(ip, "align_with_rack", x, y, ori)
+        result = wait_move(ip, move_id, timeout=120)
+        if result["state"] == "succeeded":
+            return result
+        if attempt < retries - 1:
+            logger.warning(f"[align] 재정렬 실패 ({attempt+1}/{retries}), 빠져나온 후 재시도")
+            # 같은 좌표로 standard 이동 → 로봇이 랙에서 빠져나옴
+            try:
+                back_id = create_move(ip, "standard", x, y, ori)
+                wait_move(ip, back_id, timeout=30)
+                time.sleep(2)
+            except Exception:
+                pass
+    return result
 
 
 def wait_robot_idle(ip: str, timeout: int = JACK_IDLE_TIMEOUT):
@@ -309,10 +333,9 @@ def run_jack_job(
         return {"status": "error", "message": msg}
 
     try:
-        # 1) align_with_rack
+        # 1) align_with_rack (재시도 포함)
         _notify("aligning", f"픽업 위치({pickup['name']})로 랙 정렬 이동 중...")
-        move_id = create_move(ip, "align_with_rack", pickup["x"], pickup["y"], pickup.get("ori", 0))
-        result = wait_move(ip, move_id, timeout=120)
+        result = align_with_retry(ip, pickup["x"], pickup["y"], pickup.get("ori", 0))
         if result["state"] != "succeeded":
             msg = f"랙 정렬 실패: {result.get('fail_message', result['state'])}"
             _notify("error", msg)
@@ -445,8 +468,7 @@ def run_route_job(
             sname = standby_poi["name"]
             _check_stop(ip)
             _notify("aligning", f"대기장소({sname})에서 랙 픽업 중...", 0)
-            move_id = create_move(ip, "align_with_rack", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
-            result = wait_move(ip, move_id, timeout=120)
+            result = align_with_retry(ip, standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
             if result["state"] == "succeeded":
                 _notify("jacking_up", f"대기장소({sname}) 잭 올리는 중...", 0)
                 jack_up(ip)
@@ -490,8 +512,7 @@ def run_route_job(
 
                     # 잭 업 → 바로 출발 (출발 대기 없음)
                     _notify("aligning", f"{name} 랙 재정렬 중...", i+1)
-                    move_id = create_move(ip, "align_with_rack", wp["x"], wp["y"], wp.get("ori", 0))
-                    result = wait_move(ip, move_id, timeout=120)
+                    result = align_with_retry(ip, wp["x"], wp["y"], wp.get("ori", 0))
                     if result["state"] != "succeeded":
                         msg = f"{name} 랙 재정렬 실패: {result.get('fail_message', '')}"
                         log_activity("robot", "move_error", msg, source="jack_service")
@@ -504,8 +525,7 @@ def run_route_job(
                 else:
                     # 잭이 내려간 상태 → align_with_rack로 랙 픽업
                     _notify("aligning", f"[{i+1}/{total_steps}] {name} 랙 정렬 이동 중...", i+1)
-                    move_id = create_move(ip, "align_with_rack", wp["x"], wp["y"], wp.get("ori", 0))
-                    result = wait_move(ip, move_id, timeout=120)
+                    result = align_with_retry(ip, wp["x"], wp["y"], wp.get("ori", 0))
                     if result["state"] != "succeeded":
                         msg = f"{name} 랙 정렬 실패: {result.get('fail_message', '')}"
                         log_activity("robot", "move_error", msg, source="jack_service")
@@ -610,8 +630,7 @@ def run_route_job(
                     # 다음 포인트로 이동: 현재 위치에서 잭 업 → 다음 포인트 → 잭 다운
                     update_job_status(ip, status="aligning", message=f"{current_wp['name']} 랙 재정렬 중...", current_step=0)
                     _notify("aligning", f"{current_wp['name']} 랙 재정렬 중...", 0)
-                    move_id = create_move(ip, "align_with_rack", current_wp["x"], current_wp["y"], current_wp.get("ori", 0))
-                    result = wait_move(ip, move_id, timeout=120)
+                    result = align_with_retry(ip, current_wp["x"], current_wp["y"], current_wp.get("ori", 0))
                     if result["state"] != "succeeded":
                         msg = f"랙 재정렬 실패: {result.get('fail_message', '')}"
                         log_activity("robot", "move_error", msg, source="jack_service")
@@ -642,8 +661,7 @@ def run_route_job(
                 sname = standby_poi["name"]
                 update_job_status(ip, route=f"{current_wp['name']} → {sname}", current_step=0, total_steps=2)
                 _notify("aligning", f"대기장소 이동을 위해 랙 재정렬 중...", 0)
-                move_id = create_move(ip, "align_with_rack", current_wp["x"], current_wp["y"], current_wp.get("ori", 0))
-                result = wait_move(ip, move_id, timeout=120)
+                result = align_with_retry(ip, current_wp["x"], current_wp["y"], current_wp.get("ori", 0))
                 if result["state"] == "succeeded":
                     _notify("jacking_up", "대기장소 이동을 위해 잭 올리는 중...", total_steps)
                     jack_up(ip)
@@ -661,8 +679,7 @@ def run_route_job(
             elif standby_poi and last_dropoff_wp:
                 sname = standby_poi["name"]
                 _notify("aligning", f"대기장소 이동을 위해 랙 재정렬 중...", total_steps)
-                move_id = create_move(ip, "align_with_rack", last_dropoff_wp["x"], last_dropoff_wp["y"], last_dropoff_wp.get("ori", 0))
-                result = wait_move(ip, move_id, timeout=120)
+                result = align_with_retry(ip, last_dropoff_wp["x"], last_dropoff_wp["y"], last_dropoff_wp.get("ori", 0))
                 if result["state"] == "succeeded":
                     _notify("jacking_up", "대기장소 이동을 위해 잭 올리는 중...", total_steps)
                     jack_up(ip)

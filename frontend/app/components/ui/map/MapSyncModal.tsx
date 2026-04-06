@@ -11,6 +11,11 @@ type RobotItem = {
   ip_address: string | null;
 };
 
+type RobotMapItem = {
+  id: number;
+  map_name: string;
+};
+
 type SyncResult = {
   sn: string;
   name: string;
@@ -34,17 +39,47 @@ export function MapSyncModal({
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<SyncResult[]>([]);
 
+  // 로봇 맵 목록 (대상 선택용)
+  const [robotMaps, setRobotMaps] = useState<RobotMapItem[]>([]);
+  const [selectedRobotMapId, setSelectedRobotMapId] = useState<number | null>(null);
+  const [loadingMaps, setLoadingMaps] = useState(false);
+
   useEffect(() => {
     if (!open) return;
     setLoading(true);
     setError(null);
     setResults([]);
     setSelectedSns(new Set());
+    setRobotMaps([]);
+    setSelectedRobotMapId(null);
     apiFetch<{ total: number; items: RobotItem[] }>("/api/map/robots")
       .then((data) => setRobots(data.items))
       .catch((err) => setError(err.message ?? "로봇 목록을 불러오지 못했습니다."))
       .finally(() => setLoading(false));
   }, [open]);
+
+  // 로봇 선택 시 해당 로봇의 맵 목록 로드
+  useEffect(() => {
+    const selectedArr = Array.from(selectedSns);
+    if (selectedArr.length !== 1) {
+      setRobotMaps([]);
+      setSelectedRobotMapId(null);
+      return;
+    }
+    const robot = robots.find((r) => r.sn === selectedArr[0]);
+    if (!robot?.ip_address) return;
+
+    setLoadingMaps(true);
+    apiFetch<RobotMapItem[]>(`/api/map/${robot.ip_address}/maps`)
+      .then((maps) => {
+        // sync 맵 제외
+        const filtered = maps.filter((m) => !m.map_name?.includes("-sync-"));
+        setRobotMaps(filtered);
+        if (filtered.length > 0) setSelectedRobotMapId(filtered[0].id);
+      })
+      .catch(() => setRobotMaps([]))
+      .finally(() => setLoadingMaps(false));
+  }, [selectedSns, robots]);
 
   const filtered = search
     ? robots.filter(
@@ -99,18 +134,23 @@ export function MapSyncModal({
       );
 
       try {
-        // 백엔드에서 맵 데이터 업로드 + current-map 설정 + 포즈 설정 일괄 처리
+        const syncBody: Record<string, any> = {
+          robot_ip: robot.ip_address,
+          area_name: areaName,
+          method: "full",
+        };
+        // 대상 로봇 맵 ID 지정
+        if (selectedRobotMapId) {
+          syncBody.target_robot_map_id = selectedRobotMapId;
+        }
+
         await apiFetch(`/api/map/maps/${mapId}/sync-to-robot`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            robot_ip: robot.ip_address,
-            area_name: areaName,
-            method: "full",
-          }),
+          body: JSON.stringify(syncBody),
         });
 
-        // overlay(충전소, 가상벽, rack area) 동기화
+        // overlay 동기화
         try {
           await apiFetch(`/api/map/maps/${mapId}/sync-overlays`, {
             method: "POST",
@@ -154,6 +194,8 @@ export function MapSyncModal({
     setSelectedSns(new Set());
     setError(null);
     setResults([]);
+    setRobotMaps([]);
+    setSelectedRobotMapId(null);
     onClose();
   };
 
@@ -224,6 +266,36 @@ export function MapSyncModal({
               })
             )}
           </div>
+
+          {/* 로봇 맵 선택 (대상 맵) */}
+          {selectedSns.size > 0 && (
+            <div style={{ marginTop: "var(--space-3)", padding: "8px 0", borderTop: "1px solid var(--border-color)" }}>
+              <label style={{ fontSize: "13px", fontWeight: 600, marginBottom: 4, display: "block" }}>
+                대상 로봇 맵
+              </label>
+              {loadingMaps ? (
+                <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>맵 목록 로딩 중...</span>
+              ) : robotMaps.length > 0 ? (
+                <select
+                  className="input"
+                  style={{ width: "100%", fontSize: "13px" }}
+                  value={selectedRobotMapId ?? ""}
+                  onChange={(e) => setSelectedRobotMapId(e.target.value ? Number(e.target.value) : null)}
+                >
+                  <option value="">새 맵 생성</option>
+                  {robotMaps.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.map_name} (ID: {m.id})
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                  {selectedSns.size > 1 ? "로봇 1대만 선택하면 대상 맵을 지정할 수 있습니다" : "로봇 맵이 없습니다"}
+                </span>
+              )}
+            </div>
+          )}
         </>
       ) : (
         <div className="robot-connect__list">

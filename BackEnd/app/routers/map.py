@@ -1032,11 +1032,21 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
             logger.warning(f"[sync] rack.specs 설정 실패: {e}")
 
     # ── 4) full 방식: 서버 데이터로 전체 동기화 ──
+    # body에서 대상 로봇 맵 ID 지정 가능 (프론트에서 선택)
+    body_target_map_id = body.get("target_robot_map_id")
+    effective_robot_map_id = body_target_map_id or rm.robot_map_id
+
+    # 선택한 robot_map_id를 DB에도 저장
+    if body_target_map_id and rm.robot_map_id != body_target_map_id:
+        rm.robot_map_id = body_target_map_id
+        db.commit()
+        logger.info(f"[sync] robot_map_id={body_target_map_id} DB 저장 (map_id={map_id})")
+
     if sync_method == "full":
         result = _sync_full_from_server(
             mapping_data, robot_ip, target_secret, area_name,
             overlay_data, overlay_synced, overlay_error,
-            target_robot_map_id=rm.robot_map_id,
+            target_robot_map_id=effective_robot_map_id,
         )
         log_activity("map", "map_sync",
                      f"맵 동기화 완료 → 로봇 '{robot_label}'",

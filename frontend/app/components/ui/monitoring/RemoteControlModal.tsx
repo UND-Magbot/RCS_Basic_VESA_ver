@@ -96,7 +96,7 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
   const relocalize = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/robots/remote/relocalize/${robotIp}`, { method: "POST" });
-      showStatus(res.ok ? "위치 재보정 시작" : "위치 재보정 실패");
+      showStatus(res.ok ? "시스템 재시작 중... (약 90초)" : "시스템 재시작 실패");
     } catch {
       showStatus("연결 실패");
     }
@@ -166,7 +166,7 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
                     className="remote-modal__action-btn"
                     style={{ borderColor: "rgba(160,160,160,0.4)", color: "var(--color-text-secondary)" }}
                     onClick={relocalize}
-                  >위치 재보정</button>
+                  >시스템 재시작</button>
                 </div>
               </div>
 

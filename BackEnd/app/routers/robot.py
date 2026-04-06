@@ -742,31 +742,13 @@ def api_stop_all(robot_ip: str):
 
 @router.post("/remote/relocalize/{robot_ip}")
 def api_relocalize(robot_ip: str):
-    """맵 재선택 + LiDAR 위치 재보정"""
+    """로봇 시스템 재시작 (restart_py_axbot)"""
     import requests as req
-    result = {"map_reloaded": False, "positioning_started": False}
-
-    # 1) current-map 재선택 (맵 리로드)
     try:
-        cur = req.get(f"http://{robot_ip}:8090/chassis/current-map", timeout=5)
-        if cur.status_code == 200:
-            map_id = cur.json().get("id")
-            if map_id:
-                req.post(f"http://{robot_ip}:8090/chassis/current-map",
-                         json={"map_id": map_id}, timeout=10)
-                result["map_reloaded"] = True
-    except Exception:
-        pass
-
-    # 2) LiDAR 위치 보정
-    try:
-        req.post(f"http://{robot_ip}:8090/services/start_global_positioning",
-                 json={}, timeout=5)
-        result["positioning_started"] = True
-    except Exception:
-        pass
-
-    return {"ok": True, "message": "위치 재보정 시작", **result}
+        req.post(f"http://{robot_ip}:8090/services/restart_py_axbot", json={}, timeout=10)
+        return {"ok": True, "message": "시스템 재시작 시작 (약 90초 소요)"}
+    except Exception as e:
+        raise HTTPException(500, f"시스템 재시작 실패: {str(e)}")
 
 
 @router.post("/remote/confirm/{robot_ip}")

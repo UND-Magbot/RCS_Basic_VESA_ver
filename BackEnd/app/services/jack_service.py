@@ -462,9 +462,17 @@ def run_route_job(
         # ── 시작: 대기장소(W1)에서 랙 픽업 (메인층, 첫 회차만) ──
         standby_poi = _get_standby_poi()
         if not is_main_floor:
-            # 다른층: 이미 잭 업 상태로 도착 → W1 픽업 스킵
-            jacked_up = True
-            logger.info(f"[route-job] 다른층 모드: 잭 업 상태로 시작")
+            # 다른층: 잭 업 상태 → W1으로 이동 → 잭 다운 (랙 내려놓기)
+            if standby_poi:
+                sname = standby_poi["name"]
+                _notify("moving", f"대기장소({sname})로 랙 이동 중...", 0)
+                move_id = create_move(ip, "standard", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
+                wait_move(ip, move_id, timeout=120)
+                _notify("jacking_down", f"대기장소({sname}) 잭 내리는 중...", 0)
+                jack_down(ip)
+                _interruptible_sleep(ip, JACK_WAIT_SEC)
+            jacked_up = False
+            logger.info(f"[route-job] 다른층 모드: W1에 랙 내려놓고 시작")
         elif standby_poi and not skip_standby_pickup:
             sname = standby_poi["name"]
             _check_stop(ip)
@@ -691,11 +699,17 @@ def run_route_job(
                 sname = standby_poi["name"]
                 update_job_status(ip, route=f"{current_wp['name']} → {sname}", current_step=0, total_steps=2)
                 if not is_main_floor:
-                    # 다른층: 잭 조작 없이 이동만
-                    _notify("moving", f"대기장소({sname})로 이동 중...", total_steps)
+                    # 다른층: W1 이동 → align → 잭 업 (랙 다시 들기)
+                    _notify("moving", f"대기장소({sname})로 복귀 중...", total_steps)
                     move_id = create_move(ip, "standard", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
                     wait_move(ip, move_id, timeout=120)
-                    logger.info(f"[route-job] 다른층: 복귀 완료, 잭 업 상태 유지")
+                    _notify("aligning", f"대기장소({sname}) 랙 픽업 중...", total_steps)
+                    result = align_with_retry(ip, standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
+                    if result["state"] == "succeeded":
+                        _notify("jacking_up", f"대기장소({sname}) 잭 올리는 중...", total_steps)
+                        jack_up(ip)
+                        _interruptible_sleep(ip, JACK_WAIT_SEC)
+                    logger.info(f"[route-job] 다른층: 복귀 완료, 랙 픽업")
                 else:
                     _notify("aligning", f"대기장소 이동을 위해 랙 재정렬 중...", 0)
                     result = align_with_retry(ip, current_wp["x"], current_wp["y"], current_wp.get("ori", 0))
@@ -716,11 +730,17 @@ def run_route_job(
             elif standby_poi and last_dropoff_wp:
                 sname = standby_poi["name"]
                 if not is_main_floor:
-                    # 다른층: 잭 조작 없이 이동만
-                    _notify("moving", f"대기장소({sname})로 이동 중...", total_steps)
+                    # 다른층: W1 이동 → align → 잭 업 (랙 다시 들기)
+                    _notify("moving", f"대기장소({sname})로 복귀 중...", total_steps)
                     move_id = create_move(ip, "standard", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
                     wait_move(ip, move_id, timeout=120)
-                    logger.info(f"[route-job] 다른층: 복귀 완료, 잭 업 상태 유지")
+                    _notify("aligning", f"대기장소({sname}) 랙 픽업 중...", total_steps)
+                    result = align_with_retry(ip, standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
+                    if result["state"] == "succeeded":
+                        _notify("jacking_up", f"대기장소({sname}) 잭 올리는 중...", total_steps)
+                        jack_up(ip)
+                        _interruptible_sleep(ip, JACK_WAIT_SEC)
+                    logger.info(f"[route-job] 다른층: 복귀 완료, 랙 픽업")
                 else:
                     _notify("aligning", f"대기장소 이동을 위해 랙 재정렬 중...", total_steps)
                     result = align_with_retry(ip, last_dropoff_wp["x"], last_dropoff_wp["y"], last_dropoff_wp.get("ori", 0))

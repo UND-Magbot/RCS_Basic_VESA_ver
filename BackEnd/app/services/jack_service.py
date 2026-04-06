@@ -594,7 +594,7 @@ def run_route_job(
                     break
 
             # ── 수동: 다음 포인트 / 복귀 루프 ──
-            if manual_confirm and standby_poi and last_dropoff_wp:
+            if manual_confirm and last_dropoff_wp and (standby_poi or not is_main_floor):
                 current_wp = last_dropoff_wp
                 extra_step = 0
                 while True:

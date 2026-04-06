@@ -1444,7 +1444,7 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
                 headers={"Authorization": f"Secret {target_secret}"},
                 json={"rack.specs": [{
                     "width": 0.83, "depth": 0.87,
-                    "margin": [1, 1, 1, 1], "alignment": "center",
+                    "margin": [0.1, 0.1, 0.1, 0.1], "alignment": "center",
                     "alignment_margin_back": 0.02, "extra_leg_offset": 0.0,
                     "leg_shape": "other", "leg_size": 0.05,
                     "foot_radius": 0.025, "cargo_to_jack_front_edge_min_distance": 0.05,

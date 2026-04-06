@@ -1012,7 +1012,7 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
             _rack_specs = {
                 "rack.specs": [{
                     "width": 0.83, "depth": 0.87,
-                    "margin": [0.2, 0.2, 0.2, 0.2],
+                    "margin": [0.4, 0.4, 0.4, 0.4],
                     "alignment": "center",
                     "alignment_margin_back": 0.02,
                     "extra_leg_offset": 0.0,

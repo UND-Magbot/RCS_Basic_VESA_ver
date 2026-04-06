@@ -651,8 +651,16 @@ def run_route_job(
                     current_wp = next_poi
                     log_activity("robot", "dropoff", f"드롭오프: {next_poi['name']}", source="jack_service")
 
-                # 복귀 (다른층이면 스킵)
-                if is_main_floor:
+                # 복귀
+                if not is_main_floor:
+                    # 다른층: 잭 업만
+                    _notify("aligning", f"랙 픽업 중...", total_steps)
+                    result = align_with_retry(ip, current_wp["x"], current_wp["y"], current_wp.get("ori", 0))
+                    if result["state"] == "succeeded":
+                        _notify("jacking_up", "잭 올리는 중...", total_steps)
+                        jack_up(ip)
+                        _interruptible_sleep(ip, JACK_WAIT_SEC)
+                elif is_main_floor:
                     sname = standby_poi["name"]
                     update_job_status(ip, route=f"{current_wp['name']} → {sname}", current_step=0, total_steps=2)
                     _notify("aligning", f"대기장소 이동을 위해 랙 재정렬 중...", 0)

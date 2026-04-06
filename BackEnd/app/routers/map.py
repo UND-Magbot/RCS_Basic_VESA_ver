@@ -914,21 +914,23 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
     overlay_error = None
     jack_pois = []
     try:
-        # 1) 로봇 기존 오버레이 읽기
+        # 1) 로봇 기존 오버레이 읽기 (robot_map_id 우선, 없으면 current-map)
         existing_other = []       # 관리 외 feature
         existing_charging = []    # 기존 충전소 feature (DB에 없으면 보존용)
         existing_firewall = []    # 기존 가상벽 feature (DB에 없으면 보존용)
         try:
-            r_cur = http_requests.get(
-                f"http://{robot_ip}:8090/chassis/current-map",
-                headers={"Authorization": f"Secret {target_secret}"},
-                timeout=5,
-            )
-            if r_cur.status_code == 200:
-                cur_map_id = r_cur.json().get("id")
-                if cur_map_id:
+            overlay_read_map_id = effective_robot_map_id
+            if not overlay_read_map_id:
+                r_cur = http_requests.get(
+                    f"http://{robot_ip}:8090/chassis/current-map",
+                    headers={"Authorization": f"Secret {target_secret}"},
+                    timeout=5,
+                )
+                if r_cur.status_code == 200:
+                    overlay_read_map_id = r_cur.json().get("id")
+            if overlay_read_map_id:
                     r_map = http_requests.get(
-                        f"http://{robot_ip}:8090/maps/{cur_map_id}",
+                        f"http://{robot_ip}:8090/maps/{overlay_read_map_id}",
                         headers={"Authorization": f"Secret {target_secret}"},
                         timeout=5,
                     )

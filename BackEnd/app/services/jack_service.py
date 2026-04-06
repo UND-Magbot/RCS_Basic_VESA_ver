@@ -503,7 +503,13 @@ def run_route_job(
                     log_activity("robot", "move_error", msg, source="jack_service")
                     return _fail(msg)
 
-                if wait_sec > 0:
+                # 도착 후 대기
+                if manual_confirm:
+                    _notify("waiting_confirm", f"{name} 도착. 출발 버튼을 눌러주세요", i+1)
+                    if not wait_for_confirm(ip):
+                        return _fail("출발 확인 타임아웃")
+                    _check_stop(ip)
+                elif wait_sec > 0:
                     _notify("waiting", f"{name} 대기 중 ({wait_sec}초)...", i+1)
                     _interruptible_sleep(ip, wait_sec)
 
@@ -699,10 +705,7 @@ def run_route_job(
                 sname = standby_poi["name"]
                 update_job_status(ip, route=f"{current_wp['name']} → {sname}", current_step=0, total_steps=2)
                 if not is_main_floor:
-                    # 다른층: W1 이동 → align → 잭 업 (랙 다시 들기)
-                    _notify("moving", f"대기장소({sname})로 복귀 중...", total_steps)
-                    move_id = create_move(ip, "standard", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
-                    wait_move(ip, move_id, timeout=120)
+                    # 다른층: align_with_rack로 W1 접근 (앞에서 멈추고 회전 진입) → 잭 업
                     _notify("aligning", f"대기장소({sname}) 랙 픽업 중...", total_steps)
                     result = align_with_retry(ip, standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
                     if result["state"] == "succeeded":
@@ -730,10 +733,7 @@ def run_route_job(
             elif standby_poi and last_dropoff_wp:
                 sname = standby_poi["name"]
                 if not is_main_floor:
-                    # 다른층: W1 이동 → align → 잭 업 (랙 다시 들기)
-                    _notify("moving", f"대기장소({sname})로 복귀 중...", total_steps)
-                    move_id = create_move(ip, "standard", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
-                    wait_move(ip, move_id, timeout=120)
+                    # 다른층: align_with_rack로 W1 접근 (앞에서 멈추고 회전 진입) → 잭 업
                     _notify("aligning", f"대기장소({sname}) 랙 픽업 중...", total_steps)
                     result = align_with_retry(ip, standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
                     if result["state"] == "succeeded":

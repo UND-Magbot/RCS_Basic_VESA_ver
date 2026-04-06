@@ -669,7 +669,14 @@ def tablet_page(robot_id: int, db: Session = Depends(get_db)):
     robot_name = robot.name if robot else f"Robot #{robot_id}"
     robot_ip = robot.ip_address if robot else ""
 
-    active_map = db.query(RobotMap).filter(RobotMap.is_active == True).order_by(RobotMap.id.desc()).first()
+    # 로봇의 현재 영역 맵에서 POI 조회
+    robot_area_id = int(robot.area_id) if robot and robot.area_id else None
+    if robot_area_id:
+        active_map = db.query(RobotMap).filter(
+            RobotMap.area_id == robot_area_id, RobotMap.is_active == True
+        ).order_by(RobotMap.id.desc()).first()
+    else:
+        active_map = db.query(RobotMap).filter(RobotMap.is_active == True).order_by(RobotMap.id.desc()).first()
     pois = db.query(MapPOI).filter(
         MapPOI.map_id == active_map.id if active_map else -1,
         MapPOI.is_active == True,

@@ -742,10 +742,13 @@ def api_stop_all(robot_ip: str):
 
 @router.post("/remote/relocalize/{robot_ip}")
 def api_relocalize(robot_ip: str):
-    """로봇 시스템 재시작 (restart_py_axbot)"""
+    """로봇 시스템 재시작 (restart_service) — 동기화와 동일"""
     import requests as req
     try:
-        req.post(f"http://{robot_ip}:8090/services/restart_py_axbot", json={}, timeout=10)
+        secret = DEFAULT_SECRET
+        req.post(f"http://{robot_ip}:8090/services/restart_service",
+                 headers={"Authorization": f"Secret {secret}"},
+                 json={}, timeout=10)
         return {"ok": True, "message": "시스템 재시작 시작 (약 90초 소요)"}
     except Exception as e:
         raise HTTPException(500, f"시스템 재시작 실패: {str(e)}")

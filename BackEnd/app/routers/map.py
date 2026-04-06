@@ -1365,30 +1365,41 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
             }
         })
 
+    # DB에서 해당 맵의 robot_map_id 조회 → 대상 맵 결정
+    rm = db.query(RobotMap).filter(RobotMap.id == map_id).first()
+    target_map_id = rm.robot_map_id if rm else None
+
+    # robot_map_id가 없으면 current-map 사용 (폴백)
+    if not target_map_id:
+        try:
+            r_cur = http_requests.get(
+                f"http://{robot_ip}:8090/chassis/current-map",
+                headers={"Authorization": f"Secret {target_secret}"},
+                timeout=5,
+            )
+            if r_cur.status_code == 200:
+                target_map_id = r_cur.json().get("id")
+        except Exception:
+            pass
+
+    if not target_map_id:
+        raise HTTPException(400, "대상 로봇 맵을 찾을 수 없습니다.")
+
     # 로봇 기존 overlay에서 관리 외 feature 보존
     existing_other = []
     try:
-        r_cur = http_requests.get(
-            f"http://{robot_ip}:8090/chassis/current-map",
+        r_map = http_requests.get(
+            f"http://{robot_ip}:8090/maps/{target_map_id}",
             headers={"Authorization": f"Secret {target_secret}"},
             timeout=5,
         )
-        if r_cur.status_code == 200:
-            cur_map_id = r_cur.json().get("id")
-            if cur_map_id:
-                r_map = http_requests.get(
-                    f"http://{robot_ip}:8090/maps/{cur_map_id}",
-                    headers={"Authorization": f"Secret {target_secret}"},
-                    timeout=5,
-                )
-                if r_map.status_code == 200:
-                    old_overlays = _json.loads(r_map.json().get("overlays", "{}"))
-                    for feat in old_overlays.get("features", []):
-                        feat_type = str(feat.get("properties", {}).get("type", ""))
-                        feat_rt = str(feat.get("properties", {}).get("regionType", ""))
-                        # 충전소, 가상벽, Shelves Point 제외 → 나머지 보존
-                        if feat_type not in CHARGING_TYPES and feat_type != "1" and feat_type != "34":
-                            existing_other.append(feat)
+        if r_map.status_code == 200:
+            old_overlays = _json.loads(r_map.json().get("overlays", "{}"))
+            for feat in old_overlays.get("features", []):
+                feat_type = str(feat.get("properties", {}).get("type", ""))
+                # 충전소, 가상벽, Shelves Point 제외 → 나머지 보존
+                if feat_type not in CHARGING_TYPES and feat_type != "1" and feat_type != "34":
+                    existing_other.append(feat)
     except Exception as e:
         logger.warning(f"[sync-overlays] 기존 overlay 읽기 실패: {e}")
 
@@ -1397,20 +1408,14 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
     overlay_data = {"type": "FeatureCollection", "features": merged}
     overlay_json = _json.dumps(overlay_data)
 
-    # PATCH + current-map 재선택
+    # PATCH → 대상 맵에 overlay 적용 + current-map 재선택
     try:
-        r_cur = http_requests.get(
-            f"http://{robot_ip}:8090/chassis/current-map",
-            headers={"Authorization": f"Secret {target_secret}"},
-            timeout=5,
-        )
-        cur_map_id = r_cur.json().get("id")
-        patch_map_by_id(robot_ip, target_secret, cur_map_id, {"overlays": overlay_json})
+        patch_map_by_id(robot_ip, target_secret, target_map_id, {"overlays": overlay_json})
         # current-map 재선택 → 로봇이 overlay 리로드
         http_requests.post(
             f"http://{robot_ip}:8090/chassis/current-map",
             headers={"Authorization": f"Secret {target_secret}"},
-            json={"map_id": cur_map_id}, timeout=10,
+            json={"map_id": target_map_id}, timeout=10,
         )
         logger.info(f"[sync-overlays] overlay PATCH + 맵 리로드 완료: {len(merged)}개 features")
     except Exception as e:

@@ -1101,9 +1101,8 @@ def _sync_full_from_server(
                     native_map_id = mid
                     native_map_name = mname
                 elif not target_robot_map_id and native_map_id is None:
-                    # robot_map_id 미지정 시 첫 번째 네이티브 맵 사용 (기존 동작)
-                    native_map_id = mid
-                    native_map_name = mname
+                    # robot_map_id 미지정 시 — 기존 맵 덮어쓰지 않고 새 맵 생성 (pass)
+                    pass
     except Exception:
         pass
 
@@ -1259,6 +1258,27 @@ def _sync_full_from_server(
         logger.info(f"[sync:full:fb] current-map → sync id={new_map_id}")
     except Exception as e:
         logger.error(f"[sync:full:fb] current-map 설정 실패: {e}")
+
+    # 새로 생성된 맵 ID를 DB에 저장 (robot_map_id 미지정이었던 경우)
+    if new_map_id and not target_robot_map_id:
+        try:
+            from app.database import SessionLocal as _SL
+            _db = _SL()
+            try:
+                # area_name으로 매칭하여 robot_map_id 저장
+                _rm = _db.query(RobotMap).filter(
+                    RobotMap.is_active == True,
+                    RobotMap.name == area_name,
+                    RobotMap.robot_map_id == None,
+                ).first()
+                if _rm:
+                    _rm.robot_map_id = new_map_id
+                    _db.commit()
+                    logger.info(f"[sync:full:fb] robot_map_id={new_map_id} DB 저장 (name={area_name})")
+            finally:
+                _db.close()
+        except Exception as e:
+            logger.warning(f"[sync:full:fb] robot_map_id DB 저장 실패: {e}")
 
     return {
         "message": "맵 동기화 완료 (fallback: sync 맵 — 재부팅 시 삭제됨)",

@@ -62,11 +62,21 @@ def _route_to_response(route: TaskRoute) -> dict:
 @router.get("/routes")
 def api_get_routes(
     robot_id: int | None = None,
+    area_id: int | None = None,
     db: Session = Depends(get_db),
 ):
     query = db.query(TaskRoute).filter(TaskRoute.is_active == True)
     if robot_id:
         query = query.filter(TaskRoute.robot_id == robot_id)
+    if area_id:
+        # area의 맵에 속하는 POI ID 집합으로 경로 필터
+        area_poi_ids = db.query(MapPOI.id).join(RobotMap, MapPOI.map_id == RobotMap.id).filter(
+            RobotMap.area_id == area_id, RobotMap.is_active == True, MapPOI.is_active == True
+        ).subquery()
+        route_ids = db.query(TaskRouteWaypoint.route_id).filter(
+            TaskRouteWaypoint.poi_id.in_(area_poi_ids)
+        ).distinct().subquery()
+        query = query.filter(TaskRoute.id.in_(route_ids))
     routes = query.order_by(TaskRoute.id.desc()).all()
     return {"total": len(routes), "items": [_route_to_response(r) for r in routes]}
 
@@ -404,6 +414,10 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
     dropoff = db.query(MapPOI).filter(MapPOI.id == data.dropoff_poi_id, MapPOI.is_active == True).first()
     if not pickup or not dropoff:
         raise HTTPException(404, "POI를 찾을 수 없습니다")
+    if pickup.world_x is None or pickup.world_y is None:
+        raise HTTPException(400, f"픽업 POI '{pickup.name}'의 좌표가 없습니다")
+    if dropoff.world_x is None or dropoff.world_y is None:
+        raise HTTPException(400, f"드롭오프 POI '{dropoff.name}'의 좌표가 없습니다")
 
     wp_list = [
         {"name": pickup.name, "x": pickup.world_x, "y": pickup.world_y,

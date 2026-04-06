@@ -16,6 +16,7 @@ type JackJob = {
 
 type Props = {
   liveRobots: LiveRobot[];
+  areaId?: number;
 };
 
 const STATUS_LABELS: Record<string, string> = {
@@ -30,6 +31,7 @@ const STATUS_LABELS: Record<string, string> = {
   waiting: "대기 중",
   waiting_confirm: "출발 대기",
   waiting_confirm_return: "복귀 대기",
+  waiting_next_or_return: "다음 포인트 선택",
   returning: "충전소 복귀 중",
   done: "완료",
   error: "오류",
@@ -37,7 +39,7 @@ const STATUS_LABELS: Record<string, string> = {
   running: "진행 중",
 };
 
-export function JackTestPanel({ liveRobots }: Props) {
+export function JackTestPanel({ liveRobots, areaId }: Props) {
   const [robotIp, setRobotIp] = useState("");
   const [robotId, setRobotId] = useState<number>(0);
   const [pois, setPois] = useState<PoiOption[]>([]);
@@ -51,11 +53,12 @@ export function JackTestPanel({ liveRobots }: Props) {
   const jackPois = pois.filter((p) => p.type === "jack");
 
   useEffect(() => {
-    fetch(`${API}/api/map/active-pois`)
+    const url = areaId ? `${API}/api/map/active-pois?area_id=${areaId}` : `${API}/api/map/active-pois`;
+    fetch(url)
       .then((r) => r.json())
       .then((data) => setPois(Array.isArray(data) ? data.map((p: any) => ({ id: p.id, name: p.name, type: p.poi_type || p.type })) : []))
       .catch(() => {});
-  }, []);
+  }, [areaId]);
 
   useEffect(() => {
     return () => {
@@ -164,6 +167,7 @@ export function JackTestPanel({ liveRobots }: Props) {
           </select>
         </label>
 
+
         <label className="jack-test-panel__label">
           픽업 위치
           <select
@@ -222,7 +226,8 @@ export function JackTestPanel({ liveRobots }: Props) {
                   clearInterval(pollingRef.current);
                   pollingRef.current = null;
                 }
-                setCurrentJob({ job_id: "", status: "done", message: "중지됨" });
+                setCurrentJob(null);
+                setIsStarting(false);
               }}
             >
               중지
@@ -237,14 +242,51 @@ export function JackTestPanel({ liveRobots }: Props) {
             {STATUS_LABELS[currentJob.status] || currentJob.status}
           </div>
           <div className="jack-test-panel__status-msg">{currentJob.message}</div>
-          {(currentJob.status === "waiting_confirm" || currentJob.status === "waiting_confirm_return") && robotIp && (
+          {currentJob.status === "waiting_confirm" && robotIp && (
             <button
               className="btn btn--primary jack-test-panel__btn"
               style={{ marginTop: 8 }}
               onClick={async () => {
                 await fetch(`${API}/api/robots/remote/confirm/${robotIp}`, { method: "POST" });
               }}
-            >{currentJob.status === "waiting_confirm_return" ? "복귀" : "출발"}</button>
+            >출발</button>
+          )}
+          {currentJob.status === "waiting_next_or_return" && robotIp && (
+            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 13, color: "var(--text-muted)", textAlign: "center" }}>다음 작업 포인트를 선택하세요</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select
+                  className="jack-test-panel__select"
+                  style={{ flex: 1 }}
+                  id="nextPoiSelect"
+                >
+                  {jackPois.map((p) => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+                <button
+                  className="btn btn--primary"
+                  style={{ width: "auto", padding: "10px 20px", fontSize: 14 }}
+                  onClick={async () => {
+                    const sel = document.getElementById("nextPoiSelect") as HTMLSelectElement;
+                    if (sel?.value) {
+                      await fetch(`${API}/api/robots/remote/next-point/${robotIp}`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ poi_id: Number(sel.value) }),
+                      });
+                    }
+                  }}
+                >다음 이동</button>
+              </div>
+              <button
+                className="btn jack-test-panel__btn"
+                style={{ background: "linear-gradient(135deg, #36dfc8, #2bb5a0)", color: "white" }}
+                onClick={async () => {
+                  await fetch(`${API}/api/robots/remote/return/${robotIp}`, { method: "POST" });
+                }}
+              >복귀</button>
+            </div>
           )}
         </div>
       )}

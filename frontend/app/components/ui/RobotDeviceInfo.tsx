@@ -192,7 +192,7 @@ export function RobotDeviceInfo({
     } finally {
       setIsApplying(false);
     }
-  }, [device, minBattery, chargingId, standbyId, robotSpeed, isApplying]);
+  }, [device, minBattery, chargingId, standbyId, robotSpeed, isApplying, showAlert]);
 
   if (!device) return null;
 

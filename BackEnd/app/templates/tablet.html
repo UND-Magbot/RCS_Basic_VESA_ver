@@ -176,9 +176,22 @@ body {
       <div class="status__route" id="jobRoute"></div>
       <div class="progress"><div class="progress__bar" id="jobProgress" style="width:0%"></div></div>
     </div>
-    <div class="status__buttons">
-      <button class="btn btn--primary" id="confirmBtn" onclick="confirmGo()" style="display:none;">출발</button>
-      <button class="btn btn--danger" id="stopBtn" onclick="stopTask()" style="display:none;">정지</button>
+    <!-- 출발 버튼 -->
+    <div id="confirmArea" style="display:none; margin-top:12px;">
+      <button class="btn btn--primary" onclick="confirmGo()">출발</button>
+    </div>
+    <!-- 다음 포인트 / 복귀 -->
+    <div id="nextOrReturnArea" style="display:none; margin-top:12px;">
+      <div style="font-size:13px; color:rgba(255,255,255,0.5); text-align:center; margin-bottom:8px;">다음 작업 포인트를 선택하세요</div>
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <select id="nextPoiTablet" style="flex:1;padding:11px;background:#1e2d4a;border:1px solid rgba(255,255,255,0.12);border-radius:8px;color:#e0e0e0;font-size:15px;">{{POI_OPTIONS}}</select>
+        <button class="btn btn--primary" style="width:auto;padding:11px 20px;" onclick="sendNextPoi()">이동</button>
+      </div>
+      <button class="btn btn--teal" onclick="sendReturn()">복귀</button>
+    </div>
+    <!-- 정지 -->
+    <div id="stopArea" style="display:none; margin-top:8px;">
+      <button class="btn btn--danger" onclick="stopTask()">정지</button>
     </div>
   </div>
 
@@ -303,18 +316,33 @@ async function startTask() {
 }
 async function stopTask() {
   await fetch(API+'/api/robots/remote/stop-all/'+ROBOT_IP,{method:'POST'}).catch(()=>{});
+  toast('작업이 정지되었습니다');
+}
+async function stopAndDock() {
+  await fetch(API+'/api/robots/remote/stop-all/'+ROBOT_IP,{method:'POST'}).catch(()=>{});
   await fetch(API+'/api/robots/remote/dock/'+ROBOT_IP,{method:'POST'}).catch(()=>{});
   toast('정지 → 충전소 복귀 중');
 }
 async function confirmGo() {
   await fetch(API+'/api/robots/remote/confirm/'+ROBOT_IP,{method:'POST'}).catch(()=>{});
-  toast('출발합니다'); document.getElementById('confirmBtn').style.display='none';
+  toast('출발합니다'); document.getElementById('confirmArea').style.display='none';
 }
 
 /* ── 빠른 제어 ── */
 async function jackControl(a) { await fetch(API+'/api/robots/remote/jack/'+ROBOT_IP+'/'+a,{method:'POST'}).catch(()=>{}); toast(a==='jack_up'?'잭 올리는 중...':'잭 내리는 중...'); }
 async function cancelMove() { await fetch(API+'/api/robots/remote/cancel-move/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('이동 취소됨'); }
 async function dockRobot() { await fetch(API+'/api/robots/remote/dock/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('충전소 복귀'); }
+async function sendNextPoi() {
+  const sel = document.getElementById('nextPoiTablet');
+  if (sel && sel.value) {
+    await fetch(API+'/api/robots/remote/next-point/'+ROBOT_IP, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({poi_id:parseInt(sel.value)})});
+    toast('다음 포인트 이동');
+  }
+}
+async function sendReturn() {
+  await fetch(API+'/api/robots/remote/return/'+ROBOT_IP, {method:'POST'}).catch(()=>{});
+  toast('복귀 시작');
+}
 let shutdownPending = false;
 async function shutdownRobot() {
   if (document.getElementById('shutdownBtn').disabled) return;
@@ -399,7 +427,7 @@ function renderSchedules(items, isBusy) {
 /* ── 폴링 ── */
 const STATE_MAP = {
   started:'작업 시작', aligning:'랙 정렬 중', jacking_up:'잭 올리는 중',
-  jacking_down:'잭 내리는 중', moving_to_dropoff:'드롭오프 이동 중',
+  jacking_down:'잭 내리는 중', moving_to_dropoff:'드롭오프 이동 중', waiting_next_or_return:'다음 포인트 선택',
   moving:'이동 중', waiting:'대기 중', charging:'충전소 이동 중',
   returning:'충전소 복귀 중', error:'오류 발생', waiting_confirm:'출발 대기', waiting_confirm_return:'복귀 대기',
 };
@@ -418,13 +446,15 @@ async function pollStatus() {
     if (job && job.status && job.status!=='done') {
       statusCard.style.display=''; idleMsg.style.display='none'; startBtn.disabled=true;
       shutdownBtn.disabled=true; shutdownBtn.style.opacity='0.3';
-      document.getElementById('stopBtn').style.display='';
-      const isWaitConfirm = job.status==='waiting_confirm' || job.status==='waiting_confirm_return';
-      document.getElementById('confirmBtn').style.display=isWaitConfirm?'':'none';
-      document.getElementById('confirmBtn').textContent=job.status==='waiting_confirm_return'?'복귀':'출발';
+      // 상태별 영역 표시
+      const isConfirm = job.status==='waiting_confirm';
+      const isNextOrReturn = job.status==='waiting_next_or_return';
+      document.getElementById('confirmArea').style.display = isConfirm ? '' : 'none';
+      document.getElementById('nextOrReturnArea').style.display = isNextOrReturn ? '' : 'none';
+      document.getElementById('stopArea').style.display = (isConfirm || isNextOrReturn) ? 'none' : '';
       const el=document.getElementById('jobState');
       el.textContent=STATE_MAP[job.status]||job.status;
-      el.className='status__state '+(job.status==='error'?'status__state--err':(job.status==='waiting_confirm'||job.status==='waiting_confirm_return')?'status__state--wait':job.status==='returning'?'status__state--ok':'status__state--run');
+      el.className='status__state '+(job.status==='error'?'status__state--err':(job.status==='waiting_confirm'||job.status==='waiting_confirm_return'||job.status==='waiting_next_or_return')?'status__state--wait':job.status==='returning'?'status__state--ok':'status__state--run');
       document.getElementById('jobDetail').textContent=job.message||'';
       document.getElementById('jobRoute').textContent=job.route||'';
       const pct=job.total_steps>0?Math.round((job.current_step/job.total_steps)*100):0;

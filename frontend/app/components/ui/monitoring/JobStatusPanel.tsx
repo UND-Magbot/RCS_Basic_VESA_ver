@@ -47,6 +47,7 @@ const STATUS_LABEL: Record<string, string> = {
   waiting: "대기 중",
   waiting_confirm: "출발 대기",
   waiting_confirm_return: "복귀 대기",
+  waiting_next_or_return: "다음 포인트 선택",
   returning: "충전소 복귀 중",
   done: "완료",
   error: "오류",
@@ -81,6 +82,14 @@ export function JobStatusPanel() {
   const [todaySchedules, setTodaySchedules] = useState<ScheduleItem[]>([]);
   const [recentHistory, setRecentHistory] = useState<HistoryItem[]>([]);
   const [, setTick] = useState(0);
+  const [jackPois, setJackPois] = useState<{id: number; name: string}[]>([]);
+
+  useEffect(() => {
+    fetch(`${API}/api/map/active-pois`)
+      .then(r => r.json())
+      .then(data => setJackPois((data || []).filter((p: any) => p.poi_type === "jack").map((p: any) => ({id: p.id, name: p.name}))))
+      .catch(() => {});
+  }, []);
 
   // 진행 중 작업 폴링
   useEffect(() => {
@@ -129,11 +138,21 @@ export function JobStatusPanel() {
   const handleStopAndDock = async (ip: string) => {
     try {
       await fetch(`${API}/api/robots/remote/stop-all/${ip}`, { method: "POST" });
-      await fetch(`${API}/api/robots/remote/dock/${ip}`, { method: "POST" });
-      setNotification("로봇이 충전소로 이동 중입니다");
-      setTimeout(() => setNotification(null), 5000);
+      setNotification("작업이 정지되었습니다");
+      setTimeout(() => setNotification(null), 3000);
     } catch {
       setNotification("정지 명령 실패");
+      setTimeout(() => setNotification(null), 3000);
+    }
+  };
+
+  const handleDock = async (ip: string) => {
+    try {
+      await fetch(`${API}/api/robots/remote/dock/${ip}`, { method: "POST" });
+      setNotification("충전소로 이동 중입니다");
+      setTimeout(() => setNotification(null), 5000);
+    } catch {
+      setNotification("충전소 복귀 실패");
       setTimeout(() => setNotification(null), 3000);
     }
   };
@@ -183,21 +202,52 @@ export function JobStatusPanel() {
                   {job.current_step}/{job.total_steps} 단계 ({progress}%)
                 </div>
                 <div className="job-card__message">{job.message}</div>
-                <div className="job-card__footer">
-                  {ip && <span className="job-card__robot-ip">로봇: {ip}</span>}
-                  {(job.status === "waiting_confirm" || job.status === "waiting_confirm_return") && (
+                {job.status === "waiting_confirm" && (
+                  <div style={{ marginTop: 8 }}>
                     <button
-                      className="job-card__confirm-btn"
-                      style={{ background: "linear-gradient(135deg, #5a8ff5, #3b6fd4)", color: "white", border: "none", padding: "6px 16px", borderRadius: 6, cursor: "pointer", fontWeight: 600 }}
+                      style={{ width: "100%", background: "linear-gradient(135deg, #5a8ff5, #3b6fd4)", color: "white", border: "none", padding: "10px", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: "var(--font-size-sm)" }}
                       onClick={async () => {
                         await fetch(`${API}/api/robots/remote/confirm/${ip}`, { method: "POST" });
                       }}
-                    >{job.status === "waiting_confirm_return" ? "복귀" : "출발"}</button>
-                  )}
+                    >출발</button>
+                  </div>
+                )}
+                {job.status === "waiting_next_or_return" && (
+                  <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <select
+                        id={`next-poi-${ip}`}
+                        style={{ flex: 1, padding: "8px 10px", borderRadius: 6, background: "var(--bg-surface-2)", color: "var(--text-primary)", border: "1px solid var(--border-color)", fontSize: "var(--font-size-xs)" }}
+                      >
+                        {jackPois.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                      <button
+                        style={{ background: "linear-gradient(135deg, #5a8ff5, #3b6fd4)", color: "white", border: "none", padding: "8px 16px", borderRadius: 6, cursor: "pointer", fontWeight: 600, fontSize: "var(--font-size-xs)", whiteSpace: "nowrap" }}
+                        onClick={async () => {
+                          const sel = document.getElementById(`next-poi-${ip}`) as HTMLSelectElement;
+                          if (sel?.value) {
+                            await fetch(`${API}/api/robots/remote/next-point/${ip}`, {
+                              method: "POST", headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ poi_id: Number(sel.value) }),
+                            });
+                          }
+                        }}
+                      >다음 이동</button>
+                    </div>
+                    <button
+                      style={{ width: "100%", background: "linear-gradient(135deg, #36dfc8, #2bb5a0)", color: "white", border: "none", padding: "8px", borderRadius: 6, cursor: "pointer", fontWeight: 600, fontSize: "var(--font-size-xs)" }}
+                      onClick={async () => {
+                        await fetch(`${API}/api/robots/remote/return/${ip}`, { method: "POST" });
+                      }}
+                    >복귀</button>
+                  </div>
+                )}
+                <div className="job-card__footer" style={{ marginTop: 6 }}>
+                  {ip && <span className="job-card__robot-ip">로봇: {ip}</span>}
                   <button
                     className="job-card__stop-btn"
                     onClick={() => handleStopAndDock(ip)}
-                  >정지 및 복귀</button>
+                  >정지</button>
                 </div>
               </div>
             );

@@ -255,3 +255,5 @@ Noah 일일 업무 보고 <YYYY.MM.DD>
 - align_with_rack에서 rack_area_id 사용 불가 (regionType 미확인 — AutoXing 문의 필요)
 - detectRackSize REST API 없음 (SDK 전용 — AutoXing 문의 필요)
 - 잭 다운 후 로봇 빠져나오기 시간 불확실 (고정 10초 대기 + 400 에러 시 5초 간격 재시도)
+- to_unload_point J1 이동 미작동 이슈 확인 필요
+- 맵 변경 시 경로 웨이포인트 POI ID 자동 매핑 필요 (현재 수동 DB UPDATE)

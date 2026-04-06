@@ -60,9 +60,14 @@ def delete_business(db: Session, business_id: int) -> dict:
     biz = db.query(Business).filter(Business.business_id == business_id).first()
     if not biz:
         raise HTTPException(status_code=404, detail="사업장을 찾지 못했습니다.")
-    biz.is_active = False
+    biz_name = biz.name
+    # 사업장에 속한 영역들 삭제 (영역 → 맵 → POI/라인/폴리곤/파일 포함)
+    areas = db.query(Area).filter(Area.business_id == business_id).all()
+    for area in areas:
+        delete_area(db, area.area_id)
+    db.delete(biz)
     db.commit()
-    return {"message": f"사업장 '{biz.name}'이(가) 비활성화되었습니다.", "business_id": business_id}
+    return {"message": f"사업장 '{biz_name}'이(가) 삭제되었습니다.", "business_id": business_id}
 
 
 # ── Area CRUD ─────────────────────────────────────────────────
@@ -101,9 +106,15 @@ def delete_area(db: Session, area_id: int) -> dict:
     area = db.query(Area).filter(Area.area_id == area_id).first()
     if not area:
         raise HTTPException(status_code=404, detail="영역을 찾지 못했습니다.")
-    area.is_active = False
+    area_name = area.name
+    # 영역에 속한 맵들 삭제 (맵 → POI/라인/폴리곤/파일 포함)
+    maps = db.query(RobotMap).filter(RobotMap.area_id == area_id).all()
+    for rm in maps:
+        delete_map(db, rm.id)
+    # 영역 삭제
+    db.delete(area)
     db.commit()
-    return {"message": f"영역 '{area.name}'이(가) 비활성화되었습니다.", "area_id": area_id}
+    return {"message": f"영역 '{area_name}'이(가) 삭제되었습니다.", "area_id": area_id}
 
 
 # ── RobotMap CRUD ─────────────────────────────────────────────
@@ -203,13 +214,31 @@ def get_map_by_id(db: Session, map_id: int) -> dict:
 
 
 def delete_map(db: Session, map_id: int) -> dict:
-    """맵 비활성화."""
+    """맵 완전 삭제 (POI, 라인, 폴리곤, 이미지 파일 포함)."""
+    from pathlib import Path
+
     rm = db.query(RobotMap).filter(RobotMap.id == map_id).first()
     if not rm:
         raise HTTPException(status_code=404, detail="맵을 찾지 못했습니다.")
-    rm.is_active = False
+
+    # 정적 파일 삭제
+    static_dir = Path(__file__).resolve().parent.parent.parent
+    for url_field in [rm.image_url, rm.thumbnail_url, rm.download_url, rm.bag_url, rm.trajectories_url]:
+        if url_field and url_field.startswith("/static/"):
+            fpath = static_dir / url_field.lstrip("/")
+            if fpath.exists():
+                try:
+                    fpath.unlink()
+                except Exception:
+                    pass
+
+    # 관련 데이터 삭제 (폴리곤 → 라인 → POI → 맵 순서)
+    db.query(MapPolygon).filter(MapPolygon.map_id == map_id).delete()
+    db.query(MapLine).filter(MapLine.map_id == map_id).delete()
+    db.query(MapPOI).filter(MapPOI.map_id == map_id).delete()
+    db.delete(rm)
     db.commit()
-    return {"message": "맵이 비활성화되었습니다.", "id": map_id}
+    return {"message": "맵이 삭제되었습니다.", "id": map_id}
 
 
 # ── Map Elements (POI + Line) CRUD ───────────────────────────

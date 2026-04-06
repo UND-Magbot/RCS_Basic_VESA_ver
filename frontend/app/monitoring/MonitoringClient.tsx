@@ -445,7 +445,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
         mapMeta &&
         mapMeta.grid_resolution > 0
       ) {
-        const DOCKING_OFFSET_M = 0.9;
+        const DOCKING_OFFSET_M = 0.0;
         const offsetPx = DOCKING_OFFSET_M / mapMeta.grid_resolution;
         px -= offsetPx * Math.cos(p.angle);
         py += offsetPx * Math.sin(p.angle);
@@ -558,8 +558,10 @@ export function MonitoringClient({ initialDateTime }: Props) {
       setApiRobots((p) => (p.length === 0 ? p : []));
       return;
     }
+    // TODO: 층별 로봇 필터 — 현재는 1대 로봇이 층 전환하며 사용하므로 전체 조회
+    // apiFetch<{ total: number; items: ApiRobotFull[] }>(`/api/robots?area_id=${selectedArea}`)
     apiFetch<{ total: number; items: ApiRobotFull[] }>(
-      `/api/robots?area_id=${selectedArea}`
+      `/api/robots`
     )
       .then((data) => {
         setApiRobotsFull(data.items);
@@ -1031,6 +1033,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
               <div className="left-panel-split__bottom">
                 <JackTestPanel
                   liveRobots={liveRobots}
+                  areaId={selectedArea ? Number(selectedArea) : undefined}
                 />
               </div>
             </div>
@@ -1044,11 +1047,40 @@ export function MonitoringClient({ initialDateTime }: Props) {
             }}
           >
             <section className={mapMode === "3d" ? "monitoring-map is-3d" : "monitoring-map"}>
-              <BusinessSelectBox
-                businesses={businessesForSelectBox}
-                selectedId={`${selectedBusiness}:${selectedArea}`}
-                onChange={handleBusinessAreaChange}
-              />
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <BusinessSelectBox
+                  businesses={businessesForSelectBox}
+                  selectedId={`${selectedBusiness}:${selectedArea}`}
+                  onChange={handleBusinessAreaChange}
+                />
+                {selectedArea && apiRobotsFull.length > 0 && (
+                  <button
+                    className="btn btn--ghost"
+                    style={{ fontSize: 13, whiteSpace: "nowrap", padding: "4px 10px" }}
+                    onClick={async () => {
+                      const robotId = apiRobotsFull[0]?.id;
+                      if (!robotId) return;
+                      try {
+                        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/robots/${robotId}/switch-floor`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ area_id: Number(selectedArea) }),
+                        });
+                        if (res.ok) {
+                          const d = await res.json();
+                          showAlert({ title: "층 전환", message: `층 전환 완료: ${d.map_name}` });
+                          window.location.reload();
+                        } else if (res.status === 409) {
+                          showAlert({ title: "층 전환", message: "로봇이 작업 중입니다" });
+                        } else {
+                          const d = await res.json();
+                          showAlert({ title: "층 전환", message: d.detail || "층 전환 실패" });
+                        }
+                      } catch { showAlert({ title: "층 전환", message: "연결 오류" }); }
+                    }}
+                  >층 전환</button>
+                )}
+              </div>
               {isLoading ? (
                 <div className="monitoring-map__loading">
                   <div className="spinner" />

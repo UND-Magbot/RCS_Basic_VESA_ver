@@ -124,7 +124,7 @@ def _update_robots_area(db: Session, area_id: str):
     db.commit()
 
 
-DOCKING_OFFSET = 0.9  # 충전소에서 도킹 포인트까지의 거리 (m)
+DOCKING_OFFSET = 0.0  # POI 좌표 = 도킹 위치 (오프셋 없음)
 
 
 def _correct_map_grid_origin(db: Session, map_id: int) -> bool:
@@ -159,7 +159,8 @@ def _correct_map_grid_origin(db: Session, map_id: int) -> bool:
         if not isinstance(maps_list, list) or not maps_list:
             return False
 
-        actual_map_id = maps_list[0]["id"]
+        # robot_map_id가 있으면 해당 맵, 없으면 첫 번째 맵
+        actual_map_id = rm.robot_map_id or maps_list[0]["id"]
         actual_detail = get_robot_map_by_id(source_ip, source_secret, actual_map_id)
         actual_gx = float(actual_detail.get("grid_origin_x", 0))
         actual_gy = float(actual_detail.get("grid_origin_y", 0))
@@ -542,6 +543,7 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
     이미지·맵 데이터를 로봇에서 다운로드하여 로컬 서버에 저장한 뒤 경로를 DB에 기록."""
     # 로봇 secret 조회 (download_url에 필요)
     robot_secret = None
+    robot_ip = None
     download_url = body.get("download_url")
     if download_url:
         try:
@@ -586,6 +588,30 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"[save_map] DB 저장 실패: {e}")
         raise HTTPException(status_code=500, detail=f"맵 DB 저장 에 실패했습니다: {e}")
+
+    # 로봇의 맵 목록에서 이름 매칭으로 robot_map_id 저장 (층 전환용)
+    saved_map_id_tmp = result.get("id")
+    db_map_name = body.get("name") or result.get("name")
+    if saved_map_id_tmp and robot_ip and db_map_name:
+        try:
+            secret = _find_secret(robot_ip)
+            robot_maps_list = get_maps(robot_ip, secret)
+            if isinstance(robot_maps_list, list):
+                matched_id = None
+                for rmap in robot_maps_list:
+                    if rmap.get("map_name") == db_map_name or rmap.get("name") == db_map_name:
+                        matched_id = rmap.get("id")
+                        break
+                if matched_id:
+                    rm = db.query(RobotMap).filter(RobotMap.id == saved_map_id_tmp).first()
+                    if rm:
+                        rm.robot_map_id = matched_id
+                        db.commit()
+                        logger.info(f"[save_map] robot_map_id={matched_id} 저장 (map_id={saved_map_id_tmp}, name={db_map_name})")
+                else:
+                    logger.warning(f"[save_map] 로봇 맵 목록에서 '{db_map_name}' 매칭 실패")
+        except Exception as e:
+            logger.warning(f"[save_map] robot_map_id 저장 실패: {e}")
 
     # 맵 저장 성공 시, 연결 가능한 모든 로봇의 area_id 업데이트
     area_id = body.get("area_id")
@@ -635,20 +661,28 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
                 import time as _time
                 source_secret = _find_secret(source_ip)
                 old_maps = get_maps(source_ip, source_secret)
+                # 모든 맵의 ID/버전 기록 (새 맵 감지용)
+                old_map_ids = {m["id"]: m.get("map_version", 0) for m in old_maps} if isinstance(old_maps, list) else {}
                 old_map_id = old_maps[0]["id"] if isinstance(old_maps, list) and old_maps else None
                 old_map_version = old_maps[0].get("map_version", 0) if old_map_id else 0
 
                 logger.info(f"[auto-sync] DB 보정용 새 맵 대기 중... (현재 id={old_map_id}, ver={old_map_version})")
                 new_map_found = False
+                cur_id = old_map_id  # 새 맵 감지 실패 시 기존 ID 유지
                 for wait_i in range(24):  # 최대 120초 (5초 × 24)
                     _time.sleep(5)
                     cur_maps = get_maps(source_ip, source_secret)
                     if isinstance(cur_maps, list) and cur_maps:
-                        cur_id = cur_maps[0]["id"]
-                        cur_ver = cur_maps[0].get("map_version", 0)
-                        if cur_id != old_map_id or cur_ver != old_map_version:
-                            logger.info(f"[auto-sync] 새 맵 감지: id={cur_id}, ver={cur_ver} ({(wait_i+1)*5}초)")
-                            new_map_found = True
+                        # 새로 추가되거나 버전 변경된 맵 찾기
+                        for cm in cur_maps:
+                            cm_id = cm["id"]
+                            cm_ver = cm.get("map_version", 0)
+                            if cm_id not in old_map_ids or cm_ver != old_map_ids.get(cm_id, 0):
+                                cur_id = cm_id
+                                logger.info(f"[auto-sync] 새/변경 맵 감지: id={cur_id}, ver={cm_ver} ({(wait_i+1)*5}초)")
+                                new_map_found = True
+                                break
+                        if new_map_found:
                             break
                     if wait_i % 6 == 5:
                         logger.debug(f"[auto-sync] 대기 중... ({(wait_i+1)*5}초 경과)")
@@ -657,12 +691,49 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
                     logger.warning("[auto-sync] 120초 내 새 맵 미생성 — DB 보정은 api_get_default_map에서 재시도됨")
                     return
 
+                # 새 맵의 로봇 맵 ID를 DB에 저장 (층 전환용) — 이름 매칭
+                try:
+                    _rm = sync_db.query(RobotMap).filter(RobotMap.id == saved_map_id).first()
+                    if _rm and _rm.name and isinstance(cur_maps, list):
+                        matched_id = None
+                        for cm in cur_maps:
+                            if cm.get("map_name") == _rm.name or cm.get("name") == _rm.name:
+                                matched_id = cm.get("id")
+                                break
+                        if not matched_id:
+                            # 이름 매칭 실패 시 새로 감지된 맵 ID 사용 (폴백)
+                            matched_id = cur_id if cur_id else (cur_maps[0]["id"] if cur_maps else None)
+                        if matched_id:
+                            _rm.robot_map_id = matched_id
+                            sync_db.commit()
+                            logger.info(f"[auto-sync] robot_map_id={matched_id} 저장 (name={_rm.name})")
+                    elif _rm:
+                        # 이름 없으면 기존 방식 (폴백)
+                        fallback_id = cur_id if cur_id else (cur_maps[0]["id"] if isinstance(cur_maps, list) and cur_maps else None)
+                        if fallback_id:
+                            _rm.robot_map_id = fallback_id
+                            sync_db.commit()
+                            logger.info(f"[auto-sync] robot_map_id={fallback_id} 저장 (폴백)")
+                except Exception as e:
+                    logger.warning(f"[auto-sync] robot_map_id 저장 실패: {e}")
+
                 # ── _correct_map_grid_origin()으로 한 번에 보정 (grid_origin + image + JSON) ──
                 corrected = _correct_map_grid_origin(sync_db, saved_map_id)
                 if corrected:
                     logger.info("[auto-sync] DB 보정 완료 (grid_origin + image + JSON)")
                 else:
                     logger.info("[auto-sync] DB 보정 불필요 또는 실패 — api_get_default_map에서 재시도됨")
+
+                # 소스 로봇 위치 재설정 (새 맵 좌표계에 맞게)
+                try:
+                    import requests as _req
+                    _req.post(
+                        f"http://{source_ip}:8090/services/start_global_positioning",
+                        json={}, timeout=5,
+                    )
+                    logger.info(f"[auto-sync] 소스 로봇 위치 보정 시작 ({source_ip})")
+                except Exception as e:
+                    logger.warning(f"[auto-sync] 소스 로봇 위치 보정 실패: {e}")
 
             except Exception as e:
                 logger.error(f"[auto-sync] 오류: {e}")
@@ -742,7 +813,7 @@ def api_get_map_detail(map_id: int, db: Session = Depends(get_db)):
 
 @router.delete("/maps/{map_id}")
 def api_delete_saved_map(map_id: int, db: Session = Depends(get_db)):
-    """맵 비활성화"""
+    """맵 삭제 (POI, 라인, 폴리곤, 파일 포함)"""
     try:
         rm = db.query(RobotMap).filter(RobotMap.id == map_id).first()
         map_label = rm.name if rm and rm.name else f"ID:{map_id}"
@@ -788,6 +859,19 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
     rm = db.query(RobotMap).filter(RobotMap.id == map_id).first()
     if not rm:
         raise HTTPException(status_code=404, detail="맵을 찾지 못했습니다.")
+
+    # robot_map_id가 있으면 해당 맵을 current-map으로 전환 후 동기화
+    if rm.robot_map_id:
+        try:
+            cur_map = http_requests.get(f"http://{robot_ip}:8090/chassis/current-map", timeout=5).json()
+            if cur_map.get("id") != rm.robot_map_id:
+                http_requests.post(f"http://{robot_ip}:8090/chassis/current-map",
+                                   json={"map_id": rm.robot_map_id}, timeout=10)
+                import time as _sync_time
+                _sync_time.sleep(3)
+                logger.info(f"[sync] current-map 전환: {cur_map.get('id')} → {rm.robot_map_id}")
+        except Exception as e:
+            logger.warning(f"[sync] current-map 전환 실패: {e}")
 
     # ── 1) 서버에 저장된 매핑 데이터 로드 ──
     mapping_data = None
@@ -932,8 +1016,8 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
                     "alignment": "center",
                     "alignment_margin_back": 0.02,
                     "extra_leg_offset": 0.0,
-                    "leg_shape": "square",
-                    "leg_size": 0.03,
+                    "leg_shape": "other",
+                    "leg_size": 0.05,
                     "foot_radius": 0.025,
                     "cargo_to_jack_front_edge_min_distance": 0.05,
                 }]
@@ -952,6 +1036,7 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
         result = _sync_full_from_server(
             mapping_data, robot_ip, target_secret, area_name,
             overlay_data, overlay_synced, overlay_error,
+            target_robot_map_id=rm.robot_map_id,
         )
         log_activity("map", "map_sync",
                      f"맵 동기화 완료 → 로봇 '{robot_label}'",
@@ -973,6 +1058,7 @@ def _sync_full_from_server(
     mapping_data: dict,
     target_ip: str, target_secret: str, area_name: str,
     overlay_data: dict, overlay_synced: bool, overlay_error: str | None,
+    target_robot_map_id: int | None = None,
 ) -> dict:
     """Full 동기화 (서버 데이터 기반): 서버에 저장된 매핑 데이터로 타겟 로봇의 맵 전체 교체.
 
@@ -998,7 +1084,7 @@ def _sync_full_from_server(
 
     overlay_json = _json.dumps(overlay_data)
 
-    # ── 1. 타겟 로봇의 맵 목록 → 네이티브/sync 분류 ──
+    # ── 1. 타겟 로봇의 맵 목록 → 대상 맵 찾기 ──
     native_map_id = None
     native_map_name = None
     sync_map_ids = []
@@ -1010,7 +1096,12 @@ def _sync_full_from_server(
                 mname = m.get("map_name", "")
                 if "-sync-" in str(mname):
                     sync_map_ids.append(mid)
-                else:
+                elif target_robot_map_id and mid == target_robot_map_id:
+                    # DB에 지정된 로봇 맵 ID와 일치하는 맵만 대상으로
+                    native_map_id = mid
+                    native_map_name = mname
+                elif not target_robot_map_id and native_map_id is None:
+                    # robot_map_id 미지정 시 첫 번째 네이티브 맵 사용 (기존 동작)
                     native_map_id = mid
                     native_map_name = mname
     except Exception:
@@ -1051,32 +1142,30 @@ def _sync_full_from_server(
                            if str(f.get("properties", {}).get("type", "")) == "34"]
         if shelves_features:
             import threading
+            _target_map_id = native_map_id  # 대상 맵 ID 고정 (클로저용)
             def _patch_shelves_after_restart():
                 """재시작 완료 대기 후 Shelves Point overlay PATCH"""
                 import time as _time
                 _time.sleep(90)  # 재시작 대기 (60-90초)
                 for attempt in range(3):
                     try:
-                        # 현재 맵 ID 조회
-                        r_cur = http_requests.get(
+                        # 대상 맵에 current-map 전환
+                        http_requests.post(
                             f"http://{target_ip}:8090/chassis/current-map",
                             headers={"Authorization": f"Secret {target_secret}"},
-                            timeout=10,
+                            json={"map_id": _target_map_id}, timeout=10,
                         )
-                        if r_cur.status_code != 200:
-                            _time.sleep(15)
-                            continue
-                        cur_id = r_cur.json().get("id")
-                        if not cur_id:
-                            _time.sleep(15)
-                            continue
+                        _time.sleep(3)
 
-                        # 기존 overlay 읽기
+                        # 대상 맵의 overlay 읽기
                         r_map = http_requests.get(
-                            f"http://{target_ip}:8090/maps/{cur_id}",
+                            f"http://{target_ip}:8090/maps/{_target_map_id}",
                             headers={"Authorization": f"Secret {target_secret}"},
                             timeout=10,
                         )
+                        if r_map.status_code != 200:
+                            _time.sleep(15)
+                            continue
                         existing_ov = _json.loads(r_map.json().get("overlays", "{}"))
                         existing_feats = existing_ov.get("features", [])
 
@@ -1087,24 +1176,24 @@ def _sync_full_from_server(
 
                         new_ov = _json.dumps({"type": "FeatureCollection", "features": merged})
                         http_requests.patch(
-                            f"http://{target_ip}:8090/maps/{cur_id}",
+                            f"http://{target_ip}:8090/maps/{_target_map_id}",
                             headers={"Authorization": f"Secret {target_secret}"},
                             json={"overlays": new_ov}, timeout=10,
                         )
-                        # current-map 재선택 → 로봇이 overlay 리로드
+                        # current-map 재선택 → overlay 리로드
                         http_requests.post(
                             f"http://{target_ip}:8090/chassis/current-map",
                             headers={"Authorization": f"Secret {target_secret}"},
-                            json={"map_id": cur_id}, timeout=10,
+                            json={"map_id": _target_map_id}, timeout=10,
                         )
-                        logger.info(f"[sync:full] Shelves Point {len(shelves_features)}개 재적용 + 맵 리로드 완료 (맵 {cur_id})")
+                        logger.info(f"[sync:full] Shelves Point {len(shelves_features)}개 재적용 완료 (맵 {_target_map_id})")
                         return
                     except Exception as ex:
                         logger.warning(f"[sync:full] Shelves Point 재적용 시도 {attempt+1} 실패: {ex}")
                         _time.sleep(15)
 
             threading.Thread(target=_patch_shelves_after_restart, daemon=True).start()
-            logger.info(f"[sync:full] Shelves Point 재적용 예약됨 (90초 후, {len(shelves_features)}개)")
+            logger.info(f"[sync:full] Shelves Point 재적용 예약됨 (90초 후, 맵 {_target_map_id}, {len(shelves_features)}개)")
 
         # 이전 sync 맵 삭제
         for sid in sync_map_ids:
@@ -1759,9 +1848,12 @@ async def ws_map_relay(websocket: WebSocket, robot_ip: str, topics: Optional[str
 
 
 @router.get("/active-pois")
-def api_get_active_pois(db: Session = Depends(get_db)):
-    """활성 맵의 POI 목록 반환 (작업 관리에서 사용)"""
-    active_map = db.query(RobotMap).filter(RobotMap.is_active == True).order_by(RobotMap.id.desc()).first()
+def api_get_active_pois(area_id: int | None = None, db: Session = Depends(get_db)):
+    """활성 맵의 POI 목록 반환 (area_id 지정 시 해당 영역만)"""
+    query = db.query(RobotMap).filter(RobotMap.is_active == True)
+    if area_id:
+        query = query.filter(RobotMap.area_id == area_id)
+    active_map = query.order_by(RobotMap.id.desc()).first()
     if not active_map:
         return []
     pois = db.query(MapPOI).filter(MapPOI.map_id == active_map.id, MapPOI.is_active == True).all()

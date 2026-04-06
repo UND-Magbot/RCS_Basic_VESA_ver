@@ -45,7 +45,7 @@ def _get_robot_list(db: Session) -> list[dict]:
     return [{"ip": r.ip_address, "secret": DEFAULT_SECRET} for r in robots if r.ip_address]
 
 @router.get("/quick-status/{robot_ip}")
-def api_get_robot_status(robot_ip: str):
+def api_get_robot_quick_status(robot_ip: str):
     """단일 로봇 상태 빠른 조회 (태블릿용)"""
     import requests as req
     result = {"online": False, "run_state": "OFFLINE", "battery": "-"}
@@ -71,6 +71,7 @@ def api_get_robot_status(robot_ip: str):
     except Exception:
         return result
     # 배터리 (WebSocket 1회 조회)
+    ws = None
     try:
         import websocket as _ws, json as _json, time as _time
         ws = _ws.create_connection(f"ws://{robot_ip}:8090/ws/v2/topics", timeout=2)
@@ -87,9 +88,12 @@ def api_get_robot_status(robot_ip: str):
                         pct = pct * 100
                     result["battery"] = f"{int(pct)}%"
                 break
-        ws.close()
     except Exception:
         pass
+    finally:
+        if ws:
+            try: ws.close()
+            except Exception: pass
     return result
 
 
@@ -448,6 +452,90 @@ def api_get_job_status(robot_ip: str):
     return status
 
 
+@router.post("/{robot_id}/switch-floor")
+def api_switch_floor(robot_id: int, body: dict, db: Session = Depends(get_db)):
+    """로봇 층(Area) 전환 — 맵 동기화 + area_id 업데이트"""
+    from app.services.jack_service import get_job_status
+    from app.models.map import RobotMap, MapPOI
+
+    area_id = body.get("area_id")
+    if not area_id:
+        raise HTTPException(400, "area_id 필수")
+
+    robot = db.query(Robot).filter(Robot.id == robot_id).first()
+    if not robot or not robot.ip_address:
+        raise HTTPException(404, "로봇을 찾을 수 없습니다")
+
+    # 작업 중이면 거부
+    if get_job_status(robot.ip_address):
+        raise HTTPException(409, "로봇이 작업 중입니다. 작업 완료 후 전환하세요.")
+
+    # 해당 area의 활성 맵 조회
+    area_map = db.query(RobotMap).filter(
+        RobotMap.area_id == area_id, RobotMap.is_active == True
+    ).order_by(RobotMap.id.desc()).first()
+    if not area_map:
+        raise HTTPException(404, "해당 층에 활성 맵이 없습니다")
+
+    # robot area_id 업데이트
+    robot.area_id = str(area_id)
+    # 충전소/대기장소 자동 재설정
+    charging = db.query(MapPOI).filter(
+        MapPOI.map_id == area_map.id, MapPOI.poi_type == "charging", MapPOI.is_active == True
+    ).first()
+    standby = db.query(MapPOI).filter(
+        MapPOI.map_id == area_map.id, MapPOI.poi_type == "standby", MapPOI.is_active == True
+    ).first()
+    robot.charging_id = charging.id if charging else None
+    robot.standby_id = standby.id if standby else None
+    db.commit()
+
+    # 맵 전환 — 로봇 맵 ID로 current-map만 전환
+    robot_ip = robot.ip_address
+    map_id = area_map.id
+
+    import requests as req
+    robot_map_id = area_map.robot_map_id
+    if not robot_map_id:
+        raise HTTPException(400, "해당 맵에 로봇 맵 ID가 설정되지 않았습니다. 맵 동기화를 먼저 해주세요.")
+
+    try:
+        r = req.post(f"http://{robot_ip}:8090/chassis/current-map",
+                     json={"map_id": robot_map_id}, timeout=10)
+        if r.status_code != 200:
+            raise HTTPException(500, f"맵 전환 실패: {r.text[:200]}")
+    except req.exceptions.RequestException as e:
+        raise HTTPException(500, f"맵 전환 실패: {str(e)}")
+
+    # 충전소 좌표로 초기 위치 설정 (SLAM inactive 방지)
+    if charging:
+        try:
+            req.post(
+                f"http://{robot_ip}:8090/chassis/pose",
+                json={"position": [charging.world_x, charging.world_y, 0], "ori": charging.angle or 0},
+                timeout=5,
+            )
+            import logging
+            logging.getLogger(__name__).info(f"[switch-floor] 초기 위치 설정: {charging.name} ({charging.world_x}, {charging.world_y})")
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"[switch-floor] 초기 위치 설정 실패: {e}")
+
+    log_activity("robot", "switch_floor",
+                 f"층 전환: {robot.name} → area_id={area_id} (맵: {area_map.name})",
+                 robot_id=robot_id, source="api_switch_floor")
+
+    return {
+        "ok": True,
+        "message": f"층 전환 완료 (맵: {area_map.name})",
+        "area_id": area_id,
+        "map_id": map_id,
+        "map_name": area_map.name,
+        "charging_poi": charging.name if charging else None,
+        "standby_poi": standby.name if standby else None,
+    }
+
+
 @router.get("/{robot_id}", response_model=RobotResponse)
 def api_get_robot(robot_id: int, db: Session = Depends(get_db)):
     """로봇 단건 조회"""
@@ -630,9 +718,12 @@ def api_set_speed(robot_ip: str, body: dict, db: Session = Depends(get_db)):
 
 @router.post("/remote/stop-all/{robot_ip}")
 def api_stop_all(robot_ip: str):
-    """모든 작업 정지 (이동 취소 + 잭 다운 + 스케줄/수동 배차 중단)"""
+    """모든 작업 정지 (이동 취소 + 잭 다운 + 작업 중단)"""
     import requests as req
-    # 1) 로봇 이동 취소
+    # 1) 백엔드 스케줄/수동 배차 작업 중단 (먼저 — 새 명령 방지)
+    from app.services.jack_service import stop_robot_job
+    stop_robot_job(robot_ip)
+    # 2) 로봇 이동 취소
     try:
         req.patch(
             f"http://{robot_ip}:8090/chassis/moves/current",
@@ -641,14 +732,11 @@ def api_stop_all(robot_ip: str):
         )
     except Exception:
         pass
-    # 2) 잭이 올라가 있으면 잭 다운
+    # 3) 잭이 올라가 있으면 잭 다운
     try:
         req.post(f"http://{robot_ip}:8090/services/jack_down", json={}, timeout=5)
     except Exception:
         pass
-    # 3) 백엔드 스케줄/수동 배차 작업 중단
-    from app.services.jack_service import stop_robot_job
-    stop_robot_job(robot_ip)
     return {"ok": True, "message": "모든 작업이 정지되었습니다"}
 
 
@@ -660,25 +748,58 @@ def api_confirm_robot(robot_ip: str):
     return {"ok": True, "message": "출발 확인됨"}
 
 
+@router.post("/remote/next-point/{robot_ip}")
+def api_set_next_point(robot_ip: str, body: dict, db: Session = Depends(get_db)):
+    """다음 포인트 설정 (드롭오프 후 계속 이동)"""
+    from app.services.jack_service import set_next_poi
+    poi_id = body.get("poi_id")
+    if not poi_id:
+        # 복귀
+        set_next_poi(robot_ip, "return")
+        return {"ok": True, "action": "return"}
+    poi = db.query(MapPOI).filter(MapPOI.id == poi_id, MapPOI.is_active == True).first()
+    if not poi:
+        raise HTTPException(404, "POI를 찾을 수 없습니다")
+    set_next_poi(robot_ip, {"name": poi.name, "x": poi.world_x, "y": poi.world_y, "ori": poi.angle or 0})
+    return {"ok": True, "action": "next", "poi_name": poi.name}
+
+
+@router.post("/remote/return/{robot_ip}")
+def api_return_to_standby(robot_ip: str):
+    """복귀 선택"""
+    from app.services.jack_service import set_next_poi
+    set_next_poi(robot_ip, "return")
+    return {"ok": True, "action": "return"}
+
+
 @router.post("/remote/dock/{robot_ip}")
 def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
     """충전소로 복귀"""
     import requests as req
-    # DB에서 충전소 POI 찾기
-    charger = db.query(MapPOI).filter(
+    # 로봇의 현재 영역 맵에서 충전소 POI 찾기
+    robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
+    charger_query = db.query(MapPOI).filter(
         MapPOI.poi_type == "charging",
         MapPOI.is_active == True,
-    ).first()
-    if not charger or not charger.world_x or not charger.world_y:
+    )
+    if robot and robot.charging_id:
+        charger = db.query(MapPOI).filter(MapPOI.id == robot.charging_id).first()
+    elif robot and robot.area_id:
+        from app.models.map import RobotMap
+        area_map = db.query(RobotMap).filter(
+            RobotMap.area_id == int(robot.area_id), RobotMap.is_active == True
+        ).order_by(RobotMap.id.desc()).first()
+        charger = charger_query.filter(MapPOI.map_id == area_map.id).first() if area_map else charger_query.first()
+    else:
+        charger = charger_query.first()
+    if not charger or charger.world_x is None or charger.world_y is None:
         raise HTTPException(status_code=404, detail="충전소 POI를 찾을 수 없습니다")
     try:
-        # 도킹포인트 좌표 조회
-        from app.services.jack_service import get_docking_point_coords
-        dock_coords = get_docking_point_coords(robot_ip, charger.name)
-        if dock_coords:
-            cx, cy, cyaw = dock_coords
-        else:
-            cx, cy, cyaw = charger.world_x, charger.world_y, charger.angle or 0
+        # DB 충전소 좌표 직접 사용
+        import math
+        cx = charger.world_x
+        cy = charger.world_y
+        cyaw = math.degrees(charger.angle) if charger.angle is not None else 0
         r = req.post(
             f"http://{robot_ip}:8090/chassis/moves",
             json={

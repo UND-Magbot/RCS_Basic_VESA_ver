@@ -64,6 +64,7 @@ class RobotMap(Base):
     pbstream_url = Column(String(500), nullable=True)
     trajectories_url = Column(String(500), nullable=True)
     properties_url = Column(String(500), nullable=True)
+    robot_map_id = Column(Integer, nullable=True)                              # 로봇 내부 맵 ID (층 전환용)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

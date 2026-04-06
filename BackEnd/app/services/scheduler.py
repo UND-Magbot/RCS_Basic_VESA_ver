@@ -202,20 +202,21 @@ def _return_to_charger(robot_ip: str, wp_list: list[dict]):
 
     logger.info(f"[scheduler] 충전소 복귀: {charger['name']}")
     try:
-        from app.services.jack_service import create_move, wait_move, get_docking_point_coords, update_job_status
+        from app.services.jack_service import create_move, wait_move, update_job_status
         import time as _time
+        import math as _math
         update_job_status(robot_ip, status="returning", detail="작업 완료 후 충전소로 복귀 중...")
-        # 도킹포인트 좌표 조회
-        dock_coords = get_docking_point_coords(robot_ip, charger["name"])
-        if dock_coords:
-            cx, cy, cyaw = dock_coords
-        else:
-            cx, cy, cyaw = charger["x"], charger["y"], charger.get("ori", 0)
+        # DB 충전소 좌표 직접 사용
+        cx, cy = charger["x"], charger["y"]
+        cyaw = charger.get("ori", 0)
 
         # 1단계: standard로 충전소 근처 이동
         try:
             std_move = create_move(robot_ip, "standard", cx, cy, cyaw)
             wait_move(robot_ip, std_move, timeout=120)
+        except RuntimeError:
+            # 중지 명령 — 충전소 복귀도 중단
+            raise
         except Exception:
             pass
         _time.sleep(3)
@@ -229,6 +230,9 @@ def _return_to_charger(robot_ip: str, wp_list: list[dict]):
                 from app.services.jack_service import clear_job_status
                 clear_job_status(robot_ip)
                 break
+            except RuntimeError:
+                # 중지 명령 — 도킹 재시도 중단
+                raise
             except Exception as e:
                 if attempt < 4:
                     logger.warning(f"[scheduler] 충전소 도킹 재시도 ({attempt+1}/5): {e}")
@@ -300,7 +304,7 @@ def execute_scheduled_task(task_id: int):
         if len(wp_list) < 2:
             logger.error(f"[scheduler] Not enough waypoints for route {route.id}")
             from app.crud.activity_log import log_activity
-            log_activity("robot", "task_error", f"스케줄 '{task_name}' 실행 실패: 경로에 웨이포인트가 부족합니다", source="scheduler")
+            log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 실패: 경로에 웨이포인트가 부족합니다", source="scheduler")
             _running_robots.discard(robot.id)
             return
 
@@ -417,8 +421,9 @@ def execute_scheduled_task(task_id: int):
         if has_repeat and result["status"] == "done":
             _return_rack_to_standby(robot_ip)
 
-        # 충전소 복귀
-        _return_to_charger(robot_ip, wp_list)
+        # 충전소 복귀 (성공 시에만)
+        if result["status"] == "done":
+            _return_to_charger(robot_ip, wp_list)
 
     except Exception as e:
         logger.exception(f"[scheduler] Task {task_id} error: {e}")

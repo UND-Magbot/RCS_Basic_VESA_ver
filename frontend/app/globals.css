@@ -530,7 +530,7 @@ body {
 }
 
 .left-panel-split__top {
-  flex: 1;
+  flex: 3;
   overflow-y: auto;
   min-height: 0;
 }
@@ -543,9 +543,9 @@ body {
 }
 
 .left-panel-split__bottom {
-  flex-shrink: 0;
-  max-height: 45%;
+  flex: 7;
   overflow-y: auto;
+  min-height: 0;
 }
 
 /* ── Device List Pagination ── */

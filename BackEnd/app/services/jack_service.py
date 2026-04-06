@@ -253,14 +253,13 @@ def cancel_current_move(ip: str) -> dict:
 
 JACK_WAIT_SEC = 10  # 잭 업/다운 고정 대기 시간(초)
 JACK_IDLE_TIMEOUT = 30  # 잭 다운 후 로봇 idle 대기 최대 시간
-ALIGN_MAX_RETRIES = 3  # align_with_rack 재시도 횟수
+ALIGN_MAX_RETRIES = 3
 
 
 def align_with_retry(ip: str, x: float, y: float, ori: float = 0,
                      retries: int = ALIGN_MAX_RETRIES) -> dict:
-    """align_with_rack 실패 시 뒤로 빠져나온 후 재시도.
-    잭 다운 직후 로봇이 랙 바로 아래에 있으면 LiDAR가 다리를 감지 못해 실패할 수 있음.
-    standard 이동으로 빠져나온 후 다시 접근하면 성공률이 높아짐."""
+    """align_with_rack 실패 시 재시도 (최대 3회)"""
+    result = {}
     for attempt in range(retries):
         _check_stop(ip)
         move_id = create_move(ip, "align_with_rack", x, y, ori)
@@ -268,14 +267,8 @@ def align_with_retry(ip: str, x: float, y: float, ori: float = 0,
         if result["state"] == "succeeded":
             return result
         if attempt < retries - 1:
-            logger.warning(f"[align] 재정렬 실패 ({attempt+1}/{retries}), 빠져나온 후 재시도")
-            # 같은 좌표로 standard 이동 → 로봇이 랙에서 빠져나옴
-            try:
-                back_id = create_move(ip, "standard", x, y, ori)
-                wait_move(ip, back_id, timeout=30)
-                time.sleep(2)
-            except Exception:
-                pass
+            logger.warning(f"[align] 재정렬 실패 ({attempt+1}/{retries}), 재시도")
+            time.sleep(2)
     return result
 
 

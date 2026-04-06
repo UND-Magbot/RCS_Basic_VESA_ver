@@ -434,6 +434,19 @@ def run_route_job(
     log_activity("robot", "task_start", f"작업 시작: {route_names}", source="jack_service")
 
     try:
+        # ── current-map 재선택 (SLAM 위치 인식 강제 리로드) ──
+        try:
+            cur_map_res = requests.get(f"http://{ip}:{ROBOT_PORT}/chassis/current-map", timeout=5)
+            if cur_map_res.status_code == 200:
+                cur_map_id = cur_map_res.json().get("id")
+                if cur_map_id:
+                    requests.post(f"http://{ip}:{ROBOT_PORT}/chassis/current-map",
+                                  json={"map_id": cur_map_id}, timeout=10)
+                    logger.info(f"[route-job] current-map 재선택: id={cur_map_id}")
+                    time.sleep(3)  # 맵 리로드 대기
+        except Exception as e:
+            logger.warning(f"[route-job] current-map 재선택 실패 (무시): {e}")
+
         # ── 위치 보정 (충전소에서 출발 시 SLAM 매칭 불량 방지) ──
         try:
             _notify("aligning", "위치 보정 중...", 0)

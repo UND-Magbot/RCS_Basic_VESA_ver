@@ -39,6 +39,7 @@ type BusinessItem = {
 type AreaItem = {
   area_id: number;
   name: string;
+  is_main_floor?: boolean;
 };
 
 type MapItem = {
@@ -1077,6 +1078,13 @@ export default function MapPage() {
               onBusinessCreated={(id, name) => {
                 setBusinesses((prev) => [...prev, { business_id: id, name }]);
                 setSelectedBusiness(String(id));
+              }}
+              onAreaUpdated={() => {
+                if (selectedBusiness) {
+                  apiFetch<{ total: number; items: AreaItem[] }>(
+                    `/api/map/businesses/${selectedBusiness}/areas`
+                  ).then((data) => setAreas(data.items)).catch(() => {});
+                }
               }}
             />
 

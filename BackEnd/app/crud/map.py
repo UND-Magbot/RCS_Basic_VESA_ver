@@ -84,6 +84,7 @@ def get_areas(db: Session, business_id: int) -> list[dict]:
             "area_id": a.area_id,
             "business_id": a.business_id,
             "name": a.name,
+            "is_main_floor": getattr(a, "is_main_floor", True),
             "created_at": a.created_at,
             "updated_at": a.updated_at,
         }

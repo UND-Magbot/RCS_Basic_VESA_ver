@@ -25,6 +25,7 @@ class Area(Base):
     area_id = Column(Integer, primary_key=True, autoincrement=True)
     business_id = Column(Integer, ForeignKey("businesses.business_id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(200), nullable=False)
+    is_main_floor = Column(Boolean, default=True, nullable=False)  # 메인층 여부 (False면 잭 든 상태로 작업)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

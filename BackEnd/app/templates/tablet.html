@@ -249,6 +249,7 @@ body {
         <button class="btn btn--purple" onclick="jackControl('jack_down')">잭 다운</button>
         <button class="btn btn--amber" onclick="cancelMove()">이동 취소</button>
         <button class="btn btn--teal" onclick="dockRobot()">충전소 복귀</button>
+        <button class="btn btn--blue" onclick="returnToStandby()">대기장소 복귀</button>
         <button class="btn btn--ghost" onclick="relocalize()">시스템 재시작</button>
       </div>
     </div>
@@ -333,6 +334,7 @@ async function confirmGo() {
 async function jackControl(a) { await fetch(API+'/api/robots/remote/jack/'+ROBOT_IP+'/'+a,{method:'POST'}).catch(()=>{}); toast(a==='jack_up'?'잭 올리는 중...':'잭 내리는 중...'); }
 async function cancelMove() { await fetch(API+'/api/robots/remote/cancel-move/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('이동 취소됨'); }
 async function dockRobot() { await fetch(API+'/api/robots/remote/dock/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('충전소 복귀'); }
+async function returnToStandby() { await fetch(API+'/api/robots/remote/return-to-standby/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('대기장소 복귀 시작'); }
 async function relocalize() { await fetch(API+'/api/robots/remote/relocalize/'+ROBOT_IP,{method:'POST'}).catch(()=>{}); toast('시스템 재시작 중... (약 90초)'); }
 async function sendNextPoi() {
   const sel = document.getElementById('nextPoiTablet');

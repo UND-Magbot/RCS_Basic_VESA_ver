@@ -369,7 +369,15 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
         from app.services.jack_service import run_route_job
         from app.services.scheduler import _return_to_charger
         from app.database import SessionLocal
-        result = run_route_job(robot_ip, wp_list)
+        # 메인층 여부 확인
+        from app.models.map import Area as _Area
+        _db3 = SessionLocal()
+        try:
+            _area = _db3.query(_Area).filter(_Area.area_id == route.area_id).first()
+            _is_main = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
+        finally:
+            _db3.close()
+        result = run_route_job(robot_ip, wp_list, is_main_floor=_is_main)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
@@ -450,7 +458,16 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
         from app.services.jack_service import run_route_job
         from app.services.scheduler import _return_to_charger
         from app.database import SessionLocal
-        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm)
+        # 메인층 여부 확인
+        from app.models.map import RobotMap as _RM, Area as _Area
+        _db3 = SessionLocal()
+        try:
+            _map = _db3.query(_RM).join(MapPOI, MapPOI.map_id == _RM.id).filter(MapPOI.id == data.pickup_poi_id).first()
+            _area = _db3.query(_Area).filter(_Area.area_id == _map.area_id).first() if _map else None
+            _is_main = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
+        finally:
+            _db3.close()
+        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm, is_main_floor=_is_main)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()

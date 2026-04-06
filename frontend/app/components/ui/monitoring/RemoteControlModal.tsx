@@ -93,6 +93,15 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
     }
   }, [robotIp]);
 
+  const returnToStandby = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/robots/remote/return-to-standby/${robotIp}`, { method: "POST" });
+      showStatus(res.ok ? "대기장소 복귀 시작" : "대기장소 복귀 실패");
+    } catch {
+      showStatus("연결 실패");
+    }
+  }, [robotIp]);
+
   const relocalize = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/robots/remote/relocalize/${robotIp}`, { method: "POST" });
@@ -162,6 +171,11 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
                     style={{ borderColor: "rgba(54,223,200,0.4)", color: "var(--color-info)" }}
                     onClick={dockToCharger}
                   >충전소 복귀</button>
+                  <button
+                    className="remote-modal__action-btn"
+                    style={{ borderColor: "rgba(100,149,237,0.4)", color: "#6495ed" }}
+                    onClick={returnToStandby}
+                  >대기장소 복귀</button>
                   <button
                     className="remote-modal__action-btn"
                     style={{ borderColor: "rgba(160,160,160,0.4)", color: "var(--color-text-secondary)" }}

@@ -786,6 +786,45 @@ def api_return_to_standby(robot_ip: str):
     return {"ok": True, "action": "return"}
 
 
+@router.post("/remote/return-to-standby/{robot_ip}")
+def api_return_to_standby_now(robot_ip: str):
+    """대기장소(W1) 즉시 복귀 — 현재 위치에서 align → jack_up → W1 이동 → jack_down"""
+    import threading
+    from app.services.jack_service import (
+        _get_standby_poi, align_with_retry, jack_up, jack_down,
+        create_move, wait_move, update_job_status, clear_job_status,
+        JACK_WAIT_SEC,
+    )
+
+    standby = _get_standby_poi()
+    if not standby:
+        raise HTTPException(400, "대기장소(W1) POI가 없습니다")
+
+    def _run():
+        try:
+            update_job_status(robot_ip, status="returning", message="대기장소 복귀 중...")
+            # 1) 잭 업 (이미 올려져 있을 수 있으나 안전하게)
+            try:
+                jack_up(robot_ip)
+                import time; time.sleep(JACK_WAIT_SEC)
+            except Exception:
+                pass
+            # 2) W1으로 이동
+            move_id = create_move(robot_ip, "to_unload_point",
+                                  standby["x"], standby["y"], standby.get("ori", 0))
+            result = wait_move(robot_ip, move_id, timeout=120)
+            # 3) 잭 다운
+            jack_down(robot_ip)
+            import time; time.sleep(JACK_WAIT_SEC)
+            clear_job_status(robot_ip)
+        except Exception as e:
+            logger.warning(f"[return-to-standby] 실패: {e}")
+            clear_job_status(robot_ip)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "message": f"대기장소({standby['name']}) 복귀 시작"}
+
+
 @router.post("/remote/dock/{robot_ip}")
 def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
     """충전소로 복귀"""

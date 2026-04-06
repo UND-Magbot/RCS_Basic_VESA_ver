@@ -463,6 +463,20 @@ def api_create_area(body: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"영역 생성 에 실패했습니다: {e}")
 
 
+@router.patch("/areas/{area_id}")
+def api_update_area(area_id: int, body: dict, db: Session = Depends(get_db)):
+    """영역 수정 (is_main_floor 등)"""
+    area = db.query(Area).filter(Area.area_id == area_id).first()
+    if not area:
+        raise HTTPException(404, "영역을 찾지 못했습니다.")
+    if "is_main_floor" in body:
+        area.is_main_floor = bool(body["is_main_floor"])
+    if "name" in body and body["name"].strip():
+        area.name = body["name"].strip()
+    db.commit()
+    return {"area_id": area.area_id, "name": area.name, "is_main_floor": area.is_main_floor}
+
+
 @router.delete("/areas/{area_id}")
 def api_delete_area(area_id: int, db: Session = Depends(get_db)):
     """영역 비활성화"""

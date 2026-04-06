@@ -326,6 +326,11 @@ def execute_scheduled_task(task_id: int):
         history_id = history.id
         robot_ip = robot.ip_address
         robot_id = robot.id
+        # 메인층 여부 확인
+        from app.models.map import Area as _Area
+        _area = db.query(_Area).filter(_Area.area_id == route.area_id).first()
+        _is_main_floor = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
+
         # 세션 닫기 전에 값 저장
         task_name = task.name
         route_name = route.name
@@ -376,7 +381,8 @@ def execute_scheduled_task(task_id: int):
 
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=skip_standby_pickup,
-                               skip_standby_return=skip_standby_return)
+                               skip_standby_return=skip_standby_return,
+                               is_main_floor=_is_main_floor)
 
         db_h2 = SessionLocal()
         try:
@@ -397,7 +403,8 @@ def execute_scheduled_task(task_id: int):
         # 첫 실행: W1 픽업 O, W1 복귀는 반복이면 스킵
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=False,
-                               skip_standby_return=has_repeat)
+                               skip_standby_return=has_repeat,
+                               is_main_floor=_is_main_floor)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()

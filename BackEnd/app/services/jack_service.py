@@ -427,6 +427,9 @@ def run_route_job(
     from app.crud.activity_log import log_activity
     log_activity("robot", "task_start", f"작업 시작: {route_names}", source="jack_service")
 
+    # 다른층이면 잭 업 상태 이동 시 standard 사용 (to_unload_point 대신)
+    _move_with_rack = "standard" if not is_main_floor else "to_unload_point"
+
     try:
         # ── 위치 보정 (충전소에서 출발 시 SLAM 매칭 불량 방지) ──
         try:
@@ -486,7 +489,7 @@ def run_route_job(
                 if jacked_up:
                     # 잭 올린 상태 → 픽업 위치로 이동 → 잭 다운 → 물건 올림 → 잭 업
                     _notify("moving_to_dropoff", f"[{i+1}/{total_steps}] {name} 랙 배달 중...", i+1)
-                    move_id = create_move(ip, "to_unload_point", wp["x"], wp["y"], wp.get("ori", 0))
+                    move_id = create_move(ip, _move_with_rack, wp["x"], wp["y"], wp.get("ori", 0))
                     result = wait_move(ip, move_id, timeout=120)
                     if result["state"] != "succeeded":
                         msg = f"{name} 이동 실패: {result.get('fail_message', '')}"
@@ -539,9 +542,9 @@ def run_route_job(
                     _interruptible_sleep(ip, wait_sec)
 
             elif wtype == "dropoff":
-                # 드롭오프: to_unload_point → jack_down
+                # 드롭오프: 이동 → jack_down
                 _notify("moving_to_dropoff", f"[{i+1}/{total_steps}] {name} 드롭오프 이동 중...", i+1)
-                move_id = create_move(ip, "to_unload_point", wp["x"], wp["y"], wp.get("ori", 0))
+                move_id = create_move(ip, _move_with_rack, wp["x"], wp["y"], wp.get("ori", 0))
                 result = wait_move(ip, move_id, timeout=120)
                 if result["state"] != "succeeded":
                     msg = f"{name} 드롭오프 이동 실패: {result.get('fail_message', '')}"
@@ -641,7 +644,7 @@ def run_route_job(
 
                     update_job_status(ip, status="moving_to_dropoff", message=f"{next_poi['name']} 이동 중...", current_step=1)
                     _notify("moving_to_dropoff", f"{next_poi['name']} 이동 중...", 1)
-                    move_id = create_move(ip, "to_unload_point", next_poi["x"], next_poi["y"], next_poi.get("ori", 0))
+                    move_id = create_move(ip, _move_with_rack, next_poi["x"], next_poi["y"], next_poi.get("ori", 0))
                     result = wait_move(ip, move_id, timeout=120)
                     if result["state"] != "succeeded":
                         msg = f"{next_poi['name']} 이동 실패: {result.get('fail_message', '')}"
@@ -666,7 +669,7 @@ def run_route_job(
                     _interruptible_sleep(ip, JACK_WAIT_SEC)
 
                     _notify("moving", f"대기장소({sname})로 이동 중...", total_steps)
-                    move_id = create_move(ip, "to_unload_point", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
+                    move_id = create_move(ip, _move_with_rack, standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
                     result = wait_move(ip, move_id, timeout=120)
 
                     if is_main_floor:
@@ -687,7 +690,7 @@ def run_route_job(
                     _interruptible_sleep(ip, JACK_WAIT_SEC)
 
                     _notify("moving", f"대기장소({sname})로 이동 중...", total_steps)
-                    move_id = create_move(ip, "to_unload_point", standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
+                    move_id = create_move(ip, _move_with_rack, standby_poi["x"], standby_poi["y"], standby_poi.get("ori", 0))
                     result = wait_move(ip, move_id, timeout=120)
 
                     if is_main_floor:

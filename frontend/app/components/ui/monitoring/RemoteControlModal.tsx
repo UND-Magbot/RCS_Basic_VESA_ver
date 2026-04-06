@@ -93,6 +93,15 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
     }
   }, [robotIp]);
 
+  const relocalize = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/api/robots/remote/relocalize/${robotIp}`, { method: "POST" });
+      showStatus(res.ok ? "위치 재보정 시작" : "위치 재보정 실패");
+    } catch {
+      showStatus("연결 실패");
+    }
+  }, [robotIp]);
+
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
@@ -153,6 +162,11 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
                     style={{ borderColor: "rgba(54,223,200,0.4)", color: "var(--color-info)" }}
                     onClick={dockToCharger}
                   >충전소 복귀</button>
+                  <button
+                    className="remote-modal__action-btn"
+                    style={{ borderColor: "rgba(160,160,160,0.4)", color: "var(--color-text-secondary)" }}
+                    onClick={relocalize}
+                  >위치 재보정</button>
                 </div>
               </div>
 

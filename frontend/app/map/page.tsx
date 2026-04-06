@@ -738,16 +738,10 @@ export default function MapPage() {
       const isCharging = tool === "chargingPile";
       const isJack = tool === "currentPosJack";
 
-      // 충전소: 로봇(도킹 위치)에서 yaw 반대 방향 0.9m 뒤 = 충전기 실제 위치
-      // 일반/잭킹 POI: 로봇 현재 위치 그대로 사용
-      const DOCKING_OFFSET = 0.5;
+      // 충전소/일반/잭킹 POI: 로봇 현재 위치(도킹 위치) 그대로 사용
       const angle = robotPose.ori;
-      const worldX = isCharging
-        ? robotPose.pos[0] - DOCKING_OFFSET * Math.cos(angle)
-        : robotPose.pos[0];
-      const worldY = isCharging
-        ? robotPose.pos[1] - DOCKING_OFFSET * Math.sin(angle)
-        : robotPose.pos[1];
+      const worldX = robotPose.pos[0];
+      const worldY = robotPose.pos[1];
 
       // 월드 좌표 → SVG 좌표 변환
       const ipx = (worldX - mapMeta.grid_origin_x) / mapMeta.grid_resolution;

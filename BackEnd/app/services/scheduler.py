@@ -382,7 +382,8 @@ def execute_scheduled_task(task_id: int):
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=skip_standby_pickup,
                                skip_standby_return=skip_standby_return,
-                               is_main_floor=_is_main_floor)
+                               is_main_floor=_is_main_floor,
+                               area_id=route.area_id)
 
         db_h2 = SessionLocal()
         try:
@@ -404,7 +405,8 @@ def execute_scheduled_task(task_id: int):
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=False,
                                skip_standby_return=has_repeat,
-                               is_main_floor=_is_main_floor)
+                               is_main_floor=_is_main_floor,
+                               area_id=route.area_id)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()

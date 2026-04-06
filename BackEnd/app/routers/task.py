@@ -377,7 +377,7 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
             _is_main = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
         finally:
             _db3.close()
-        result = run_route_job(robot_ip, wp_list, is_main_floor=_is_main)
+        result = run_route_job(robot_ip, wp_list, is_main_floor=_is_main, area_id=route.area_id)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
@@ -467,7 +467,8 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
             _is_main = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
         finally:
             _db3.close()
-        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm, is_main_floor=_is_main)
+        _area_id = _map.area_id if _map else None
+        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm, is_main_floor=_is_main, area_id=_area_id)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()

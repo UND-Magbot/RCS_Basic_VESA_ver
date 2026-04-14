@@ -344,89 +344,40 @@ export function RobotDeviceInfo({
             <span className="robot-info__range-value">{robotSpeed.toFixed(1)} m/s</span>
           </div>
 
-          {showChargingStation && (() => {
-            const allPois = [
-              ...chargingPois.map((p) => ({ ...p, type: "charging" as const })),
-              ...standbyPois.map((p) => ({ ...p, type: "standby" as const })),
-            ];
-            const selectedPoi =
-              chargingId != null
-                ? allPois.find((p) => p.type === "charging" && p.id === chargingId)
-                : standbyId != null
-                ? allPois.find((p) => p.type === "standby" && p.id === standbyId)
-                : null;
-
-            return (
+          {showChargingStation && (
+            <>
               <div className="robot-info__charging-row">
-                <span className="robot-info__label">귀환장소</span>
-                <div className="robot-info__dropdown" ref={poiDropdownRef}>
-                  <button
-                    type="button"
-                    className="robot-info__dropdown-trigger"
-                    ref={poiTriggerRef}
-                    disabled={readOnly}
-                    onClick={() => {
-                      if (readOnly) return;
-                      if (!poiDropdownOpen && poiTriggerRef.current) {
-                        const rect = poiTriggerRef.current.getBoundingClientRect();
-                        setPoiDropdownPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
-                      }
-                      setPoiDropdownOpen((v) => !v);
-                    }}
-                  >
-                    <span className={selectedPoi == null ? "robot-info__dropdown-placeholder" : ""}>
-                      {selectedPoi
-                        ? `${selectedPoi.name} [${selectedPoi.type === "charging" ? "충전" : "대기"}]`
-                        : "귀환장소를 선택해주세요."}
-                    </span>
-                    <svg
-                      className={`robot-info__dropdown-arrow${poiDropdownOpen ? " robot-info__dropdown-arrow--open" : ""}`}
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="12"
-                      height="12"
-                      viewBox="0 0 12 12"
-                    >
-                      <path fill="currentColor" d="M6 8L1 3h10z" />
-                    </svg>
-                  </button>
-                  {poiDropdownOpen && poiDropdownPos && (
-                    <ul
-                      className="robot-info__dropdown-menu"
-                      style={{ top: poiDropdownPos.top, left: poiDropdownPos.left, width: poiDropdownPos.width }}
-                    >
-                      {allPois.map((poi) => {
-                        const isSelected =
-                          poi.type === "charging" ? chargingId === poi.id : standbyId === poi.id;
-                        return (
-                          <li key={`${poi.type}-${poi.id}`}>
-                            <button
-                              type="button"
-                              className={`robot-info__dropdown-option${isSelected ? " robot-info__dropdown-option--selected" : ""}`}
-                              onClick={() => {
-                                if (poi.type === "charging") {
-                                  setChargingId(poi.id);
-                                  setStandbyId(null);
-                                } else {
-                                  setStandbyId(poi.id);
-                                  setChargingId(null);
-                                }
-                                setPoiDropdownOpen(false);
-                              }}
-                            >
-                              {poi.name}
-                              <span className="robot-info__poi-badge">
-                                {poi.type === "charging" ? "충전" : "대기"}
-                              </span>
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  )}
-                </div>
+                <span className="robot-info__label">충전소</span>
+                <select
+                  className="robot-info__native-select"
+                  value={chargingId ?? ""}
+                  disabled={readOnly}
+                  onChange={(e) => setChargingId(e.target.value ? Number(e.target.value) : null)}
+                  style={{ flex: 1, padding: "6px 10px", background: "var(--bg-surface-2)", border: "1px solid var(--border-color)", borderRadius: 6, color: "var(--text-primary)" }}
+                >
+                  <option value="">선택 안 함</option>
+                  {chargingPois.map((p) => (
+                    <option key={`c-${p.id}`} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
               </div>
-            );
-          })()}
+              <div className="robot-info__charging-row">
+                <span className="robot-info__label">랙 위치(W1)</span>
+                <select
+                  className="robot-info__native-select"
+                  value={standbyId ?? ""}
+                  disabled={readOnly}
+                  onChange={(e) => setStandbyId(e.target.value ? Number(e.target.value) : null)}
+                  style={{ flex: 1, padding: "6px 10px", background: "var(--bg-surface-2)", border: "1px solid var(--border-color)", borderRadius: 6, color: "var(--text-primary)" }}
+                >
+                  <option value="">선택 안 함</option>
+                  {standbyPois.map((p) => (
+                    <option key={`s-${p.id}`} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+            </>
+          )}
 
           {!readOnly && (
             <>

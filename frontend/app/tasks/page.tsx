@@ -81,6 +81,7 @@ export default function TasksPage() {
 
   // 경로 편집 상태
   const [rName, setRName] = useState("");
+  const [rWorkMode, setRWorkMode] = useState<"rack_pickup" | "delivery_no_rack" | "simple_move">("rack_pickup");
   const [rWaypoints, setRWaypoints] = useState<{ poi_id: number; poi_name: string; waypoint_type: string; wait_sec: number }[]>([]);
   const [isEditingRoute, setIsEditingRoute] = useState(false);
 
@@ -95,15 +96,15 @@ export default function TasksPage() {
   const fetchAll = useCallback(async () => {
     try {
       const [taskData, routeData, historyData, robotRes, poiRes] = await Promise.all([
-        getTasks(),
-        getRoutes(),
-        getAllHistory({ limit: HISTORY_PAGE_SIZE, skip: 0 }),
-        fetch(`${API}/api/robots/live`, { cache: "no-store" }).then((r) => r.json()),
+        getTasks().catch(() => ({ items: [] })),
+        getRoutes().catch(() => ({ items: [] })),
+        getAllHistory({ limit: HISTORY_PAGE_SIZE, skip: 0 }).catch(() => ({ items: [], total: 0 })),
+        fetch(`${API}/api/robots/live`, { cache: "no-store" }).then((r) => r.json()).catch(() => ({ items: [] })),
         fetch(`${API}/api/map/active-pois`, { cache: "no-store" }).then((r) => r.json()).catch(() => []),
       ]);
-      setTasks(taskData.items);
-      setRoutes(routeData.items);
-      setHistory(historyData.items);
+      setTasks(taskData.items || []);
+      setRoutes(routeData.items || []);
+      setHistory(historyData.items || []);
       setHistoryTotal(historyData.total || 0);
       setRobots(
         (robotRes.items || [])
@@ -116,8 +117,11 @@ export default function TasksPage() {
           world_x: p.world_x || 0, world_y: p.world_y || 0,
         }))
       );
-    } catch { /* ignore */ }
-    setIsLoading(false);
+    } catch {
+      /* ignore */
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -205,6 +209,7 @@ export default function TasksPage() {
   const startRouteCreate = () => {
     setEditRoute(null);
     setRName("");
+    setRWorkMode("rack_pickup");
     setRWaypoints([]);
     setIsEditingRoute(true);
   };
@@ -212,6 +217,7 @@ export default function TasksPage() {
   const startRouteEdit = (r: TaskRoute) => {
     setEditRoute(r);
     setRName(r.name);
+    setRWorkMode(r.work_mode || "rack_pickup");
     setRWaypoints(r.waypoints.map((w: any) => ({
       poi_id: w.poi_id,
       poi_name: w.poi_name || "",
@@ -275,7 +281,7 @@ export default function TasksPage() {
     const waypoints: TaskRouteCreate["waypoints"] = rWaypoints.map((w, i) => ({
       poi_id: w.poi_id, order: i, waypoint_type: w.waypoint_type, wait_sec: w.wait_sec,
     }));
-    const data: TaskRouteCreate = { name: rName, waypoints };
+    const data: TaskRouteCreate = { name: rName, work_mode: rWorkMode, waypoints };
     try {
       if (editRoute) {
         await updateRoute(editRoute.id, data);
@@ -471,6 +477,14 @@ export default function TasksPage() {
                           경로 이름
                           <input value={rName} onChange={(e) => setRName(e.target.value)} placeholder="예: J1→J2 이동" />
                         </label>
+                        <label>
+                          작업 종류
+                          <select value={rWorkMode} onChange={(e) => setRWorkMode(e.target.value as typeof rWorkMode)}>
+                            <option value="rack_pickup">랙 픽업 (W1 → 배달 → 복귀)</option>
+                            <option value="delivery_no_rack">배달 (랙 없이, 각 포인트 잭 업/다운)</option>
+                            <option value="simple_move">단순 이동 (잭 조작 없음)</option>
+                          </select>
+                        </label>
                       </div>
                       <div className="route-editor__actions">
                         <button className="tasks-btn" onClick={cancelRouteEdit}>취소</button>
@@ -503,16 +517,18 @@ export default function TasksPage() {
                                     <button className="route-card__remove" onClick={() => removeWaypoint(idx)}>✕</button>
                                   </div>
                                   <div className="route-card__name">{w.poi_name}</div>
-                                  <select
-                                    className="route-card__type-select"
-                                    value={w.waypoint_type}
-                                    onChange={(e) => changeWaypointType(idx, e.target.value)}
-                                  >
-                                    <option value="pickup">픽업</option>
-                                    <option value="dropoff">드롭오프</option>
-                                    <option value="standby">대기</option>
-                                    <option value="charging">충전</option>
-                                  </select>
+                                  {rWorkMode !== "simple_move" && (
+                                    <select
+                                      className="route-card__type-select"
+                                      value={w.waypoint_type}
+                                      onChange={(e) => changeWaypointType(idx, e.target.value)}
+                                    >
+                                      <option value="pickup">픽업</option>
+                                      <option value="dropoff">드롭오프</option>
+                                      <option value="standby">대기</option>
+                                      <option value="charging">충전</option>
+                                    </select>
+                                  )}
                                   <div className="route-card__wait">
                                     <span>대기</span>
                                     <input

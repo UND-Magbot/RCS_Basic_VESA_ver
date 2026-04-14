@@ -14,11 +14,13 @@ class WaypointInput(BaseModel):
 
 class TaskRouteCreate(BaseModel):
     name: str
+    work_mode: str = "rack_pickup"  # rack_pickup / delivery_no_rack / simple_move
     waypoints: list[WaypointInput]
 
 
 class TaskRouteUpdate(BaseModel):
     name: Optional[str] = None
+    work_mode: Optional[str] = None
     waypoints: Optional[list[WaypointInput]] = None
 
 
@@ -38,6 +40,7 @@ class WaypointResponse(BaseModel):
 class TaskRouteResponse(BaseModel):
     id: int
     name: str
+    work_mode: str = "rack_pickup"
     waypoints: list[WaypointResponse] = []
     is_active: bool = True
     created_at: Optional[datetime] = None

@@ -53,6 +53,7 @@ def _route_to_response(route: TaskRoute) -> dict:
     return {
         "id": route.id,
         "name": route.name,
+        "work_mode": getattr(route, "work_mode", "rack_pickup"),
         "waypoints": waypoints,
         "is_active": route.is_active,
         "created_at": route.created_at,
@@ -83,7 +84,7 @@ def api_get_routes(
 
 @router.post("/routes", status_code=201)
 def api_create_route(data: TaskRouteCreate, db: Session = Depends(get_db)):
-    route = TaskRoute(name=data.name)
+    route = TaskRoute(name=data.name, work_mode=data.work_mode or "rack_pickup")
     db.add(route)
     db.flush()
 
@@ -120,6 +121,8 @@ def api_update_route(route_id: int, data: TaskRouteUpdate, db: Session = Depends
 
     if data.name is not None:
         route.name = data.name
+    if data.work_mode is not None:
+        route.work_mode = data.work_mode
 
     if data.waypoints is not None:
         db.query(TaskRouteWaypoint).filter(TaskRouteWaypoint.route_id == route_id).delete()
@@ -369,15 +372,7 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
         from app.services.jack_service import run_route_job
         from app.services.scheduler import _return_to_charger
         from app.database import SessionLocal
-        # 메인층 여부 확인
-        from app.models.map import Area as _Area
-        _db3 = SessionLocal()
-        try:
-            _area = _db3.query(_Area).filter(_Area.area_id == route.area_id).first()
-            _is_main = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
-        finally:
-            _db3.close()
-        result = run_route_job(robot_ip, wp_list, is_main_floor=_is_main, area_id=route.area_id)
+        result = run_route_job(robot_ip, wp_list, work_mode=getattr(route, "work_mode", "rack_pickup"))
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
@@ -405,6 +400,7 @@ class ManualRunPoisRequest(_BaseModel):
     pickup_poi_id: int
     dropoff_poi_id: int
     manual_confirm: bool = False
+    work_mode: str = "rack_pickup"
 
 @router.post("/manual-run-pois")
 def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db)):
@@ -458,17 +454,15 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
         from app.services.jack_service import run_route_job
         from app.services.scheduler import _return_to_charger
         from app.database import SessionLocal
-        # 메인층 여부 확인
-        from app.models.map import RobotMap as _RM, Area as _Area
+        # 영역 ID 확인 (POI → 맵 → 영역)
+        from app.models.map import RobotMap as _RM
         _db3 = SessionLocal()
         try:
             _map = _db3.query(_RM).join(MapPOI, MapPOI.map_id == _RM.id).filter(MapPOI.id == data.pickup_poi_id).first()
-            _area = _db3.query(_Area).filter(_Area.area_id == _map.area_id).first() if _map else None
-            _is_main = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
+            _area_id = _map.area_id if _map else None
         finally:
             _db3.close()
-        _area_id = _map.area_id if _map else None
-        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm, is_main_floor=_is_main, area_id=_area_id)
+        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm, area_id=_area_id, work_mode=data.work_mode or "rack_pickup")
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()

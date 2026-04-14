@@ -31,6 +31,7 @@ def create_database_if_not_exists():
             user=DB_USER,
             password=DB_PASSWORD,
             charset="utf8mb4",
+            connect_timeout=5,
         )
     except Exception as e:
         print(f"[DB] 데이터베이스 서버 연결 실패 ({DB_HOST}:{DB_PORT}): {e}")
@@ -53,8 +54,10 @@ def create_database_if_not_exists():
 def init_db():
     """DB 생성 + 테이블 생성"""
     try:
-        create_database_if_not_exists()
+        # create_database_if_not_exists는 hang 이슈로 스킵 (DB는 미리 만들어두기)
+        print("[DB] Base.metadata.create_all...")
         Base.metadata.create_all(bind=engine)
+        print("[DB] init_db done")
     except Exception as e:
         print(f"[DB] 데이터베이스 초기화 실패: {e}")
         raise

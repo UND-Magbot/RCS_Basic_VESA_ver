@@ -171,14 +171,34 @@ def _return_rack_to_standby(robot_ip: str):
 
 def _return_to_charger(robot_ip: str, wp_list: list[dict]):
     """작업 종료 후 충전소 복귀"""
-    # 경로에서 충전소 찾기
+    # 1) 로봇에 지정된 charging_id 우선 사용
     charger = None
-    for wp in wp_list:
-        if wp.get("poi_type") == "charging" or wp.get("waypoint_type") == "charging":
-            charger = wp
-            break
+    db = SessionLocal()
+    try:
+        from app.models.robot import Robot
+        robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
+        if robot and robot.charging_id:
+            charging_poi = db.query(MapPOI).filter(
+                MapPOI.id == robot.charging_id, MapPOI.is_active == True
+            ).first()
+            if charging_poi and charging_poi.world_x is not None:
+                charger = {
+                    "name": charging_poi.name,
+                    "x": charging_poi.world_x,
+                    "y": charging_poi.world_y,
+                    "ori": charging_poi.angle or 0,
+                }
+    finally:
+        db.close()
 
-    # 경로에 없으면 DB에서 충전소 POI 찾기
+    # 2) 경로에서 충전소 찾기
+    if not charger:
+        for wp in wp_list:
+            if wp.get("poi_type") == "charging" or wp.get("waypoint_type") == "charging":
+                charger = wp
+                break
+
+    # 3) 경로에도 없으면 DB에서 첫 번째 충전소 POI 찾기 (폴백)
     if not charger:
         db = SessionLocal()
         try:
@@ -326,10 +346,6 @@ def execute_scheduled_task(task_id: int):
         history_id = history.id
         robot_ip = robot.ip_address
         robot_id = robot.id
-        # 메인층 여부 확인
-        from app.models.map import Area as _Area
-        _area = db.query(_Area).filter(_Area.area_id == route.area_id).first()
-        _is_main_floor = _area.is_main_floor if _area and hasattr(_area, "is_main_floor") else True
 
         # 세션 닫기 전에 값 저장
         task_name = task.name
@@ -382,8 +398,7 @@ def execute_scheduled_task(task_id: int):
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=skip_standby_pickup,
                                skip_standby_return=skip_standby_return,
-                               is_main_floor=_is_main_floor,
-                               area_id=route.area_id)
+                               work_mode=getattr(route, "work_mode", "rack_pickup"))
 
         db_h2 = SessionLocal()
         try:
@@ -405,8 +420,7 @@ def execute_scheduled_task(task_id: int):
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=False,
                                skip_standby_return=has_repeat,
-                               is_main_floor=_is_main_floor,
-                               area_id=route.area_id)
+                               work_mode=getattr(route, "work_mode", "rack_pickup"))
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()

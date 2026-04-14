@@ -740,16 +740,20 @@ def api_stop_all(robot_ip: str):
 
 @router.post("/remote/relocalize/{robot_ip}")
 def api_relocalize(robot_ip: str):
-    """로봇 시스템 재시작 (restart_service) — 동기화와 동일"""
-    import requests as req
+    """위치 복구 — start_global_positioning + 실패 시 시스템 재시작 옵션"""
+    from app.services.jack_service import recover_positioning
     try:
-        secret = DEFAULT_SECRET
+        ok = recover_positioning(robot_ip, max_wait_sec=15)
+        if ok:
+            return {"ok": True, "message": "위치 복구 완료"}
+        # 복구 실패 시 시스템 재시작
+        import requests as req
         req.post(f"http://{robot_ip}:8090/services/restart_service",
-                 headers={"Authorization": f"Secret {secret}"},
+                 headers={"Authorization": f"Secret {DEFAULT_SECRET}"},
                  json={}, timeout=10)
-        return {"ok": True, "message": "시스템 재시작 시작 (약 90초 소요)"}
+        return {"ok": True, "message": "위치 복구 실패 → 시스템 재시작 시작 (약 90초)"}
     except Exception as e:
-        raise HTTPException(500, f"시스템 재시작 실패: {str(e)}")
+        raise HTTPException(500, f"위치 복구 실패: {str(e)}")
 
 
 @router.post("/remote/confirm/{robot_ip}")
@@ -794,7 +798,7 @@ def api_return_to_standby_now(robot_ip: str):
         JACK_WAIT_SEC,
     )
 
-    standby = _get_standby_poi()
+    standby = _get_standby_poi(robot_ip=robot_ip)
     if not standby:
         raise HTTPException(400, "대기장소(W1) POI가 없습니다")
 
@@ -846,11 +850,10 @@ def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
     if not charger or charger.world_x is None or charger.world_y is None:
         raise HTTPException(status_code=404, detail="충전소 POI를 찾을 수 없습니다")
     try:
-        # DB 충전소 좌표 직접 사용
-        import math
+        # DB 충전소 좌표 직접 사용 (target_ori는 라디안)
         cx = charger.world_x
         cy = charger.world_y
-        cyaw = math.degrees(charger.angle) if charger.angle is not None else 0
+        cyaw = charger.angle if charger.angle is not None else 0
         r = req.post(
             f"http://{robot_ip}:8090/chassis/moves",
             json={

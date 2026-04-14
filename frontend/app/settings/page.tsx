@@ -17,7 +17,7 @@ function formatDateTime() {
   return `${yyyy}-${mm}-${dd} ${hh}:${min}`;
 }
 
-type Tab = "password-change" | "db-backup";
+type Tab = "password-change" | "db-backup" | "system-name";
 
 export default function SettingsPage() {
   const [navCollapsed, setNavCollapsed] = useState(true);
@@ -61,16 +61,91 @@ export default function SettingsPage() {
                   >
                     비밀번호 변경
                   </button>
+                  <button
+                    className={`settings-page__tab${activeTab === "system-name" ? " settings-page__tab--active" : ""}`}
+                    onClick={() => setActiveTab("system-name")}
+                  >
+                    시스템 이름
+                  </button>
                 </div>
               </header>
 
               {activeTab === "password-change" && <PasswordChangeTab />}
 
               {activeTab === "db-backup" && <DbBackupTab />}
+
+              {activeTab === "system-name" && <SystemNameTab />}
             </div>
           </main>
         </div>
       </div>
     </>
+  );
+}
+
+function SystemNameTab() {
+  const [name, setName] = useState("");
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    const v = localStorage.getItem("system_name") || "";
+    setName(v);
+  }, []);
+
+  const handleSave = () => {
+    const trimmed = name.trim();
+    localStorage.setItem("system_name", trimmed);
+    window.dispatchEvent(new CustomEvent("system-name-change", { detail: trimmed }));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const handleReset = () => {
+    localStorage.removeItem("system_name");
+    window.dispatchEvent(new CustomEvent("system-name-change", { detail: "UND RCS" }));
+    setName("");
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  return (
+    <div style={{ padding: 24, maxWidth: 500 }}>
+      <h3 style={{ marginTop: 0 }}>시스템 이름</h3>
+      <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16 }}>
+        상단 타이틀에 표시되는 이름을 변경합니다. 비우고 저장하면 기본값(UND RCS)으로 돌아갑니다.
+      </p>
+      <input
+        type="text"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="UND RCS"
+        style={{
+          width: "100%", padding: "10px 12px", fontSize: 14,
+          background: "var(--bg-surface-2)", border: "1px solid var(--border-color)",
+          borderRadius: 6, color: "var(--text-primary)", marginBottom: 12,
+        }}
+      />
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          onClick={handleSave}
+          style={{
+            padding: "8px 16px", background: "var(--color-primary)", color: "#fff",
+            border: "none", borderRadius: 6, cursor: "pointer", fontSize: 13,
+          }}
+        >
+          저장
+        </button>
+        <button
+          onClick={handleReset}
+          style={{
+            padding: "8px 16px", background: "transparent", color: "var(--text-primary)",
+            border: "1px solid var(--border-color)", borderRadius: 6, cursor: "pointer", fontSize: 13,
+          }}
+        >
+          기본값으로
+        </button>
+        {saved && <span style={{ alignSelf: "center", color: "var(--color-success, #4caf50)", fontSize: 13 }}>저장됨</span>}
+      </div>
+    </div>
   );
 }

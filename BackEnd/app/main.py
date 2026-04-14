@@ -46,10 +46,15 @@ def _apply_saved_speeds():
 
 @asynccontextmanager
 async def lifespan(application: FastAPI):
-    # 서버 시작 시 DB + 테이블 자동 생성
+    log = logging.getLogger(__name__)
+    log.info("[startup] init_db...")
     init_db()
-    _apply_saved_speeds()
+    log.info("[startup] init_db done")
+    import threading
+    threading.Thread(target=_apply_saved_speeds, daemon=True).start()
+    log.info("[startup] init_scheduler...")
     init_scheduler()
+    log.info("[startup] init_scheduler done")
     yield
     shutdown_scheduler()
 

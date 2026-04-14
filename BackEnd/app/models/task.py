@@ -11,6 +11,10 @@ class TaskRoute(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(200), nullable=False)
+    work_mode = Column(String(30), nullable=False, default="rack_pickup")
+    # rack_pickup: W1 랙 픽업 → 배달 → 복귀 (풀 흐름)
+    # delivery_no_rack: W1 픽업 스킵, standard 이동 + 각 포인트 jack_up/jack_down
+    # simple_move: standard 이동만, 잭 조작 없음
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

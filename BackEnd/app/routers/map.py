@@ -1024,21 +1024,34 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
                 f"carto_map: {len(mapping_data.get('carto_map', ''))}자, "
                 f"오버레이: {len(overlay_data.get('features', []))}개")
 
-    # ── 3) jack POI가 있으면 rack.specs 자동 설정 ──
+    # ── 3) jack POI가 있으면 rack.specs 자동 설정 (큰 랙 + 작은 랙) ──
     if jack_pois:
         try:
             _rack_specs = {
-                "rack.specs": [{
-                    "width": 0.83, "depth": 0.87,
-                    "margin": [0.1, 0.1, 0.1, 0.1],
-                    "alignment": "center",
-                    "alignment_margin_back": 0.02,
-                    "extra_leg_offset": 0.0,
-                    "leg_shape": "other",
-                    "leg_size": 0.05,
-                    "foot_radius": 0.025,
-                    "cargo_to_jack_front_edge_min_distance": 0.05,
-                }]
+                "rack.specs": [
+                    {
+                        "width": 0.83, "depth": 0.87,
+                        "margin": [0.1, 0.1, 0.1, 0.1],
+                        "alignment": "center",
+                        "alignment_margin_back": 0.02,
+                        "extra_leg_offset": 0.0,
+                        "leg_shape": "other",
+                        "leg_size": 0.05,
+                        "foot_radius": 0.025,
+                        "cargo_to_jack_front_edge_min_distance": 0.05,
+                    },
+                    {
+                        "width": 0.63, "depth": 0.67,
+                        "margin": [0.1, 0.1, 0.1, 0.1],
+                        "alignment": "center",
+                        "alignment_margin_back": 0.02,
+                        "extra_leg_offset": 0.0,
+                        "leg_shape": "other",
+                        "leg_size": 0.05,
+                        "foot_radius": 0.025,
+                        "cargo_to_jack_front_edge_min_distance": 0.05,
+                    },
+                ]
             }
             http_requests.patch(
                 f"http://{robot_ip}:8090/system/settings/user",
@@ -1446,13 +1459,22 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
             http_requests.patch(
                 f"http://{robot_ip}:8090/system/settings/user",
                 headers={"Authorization": f"Secret {target_secret}"},
-                json={"rack.specs": [{
-                    "width": 0.83, "depth": 0.87,
-                    "margin": [0.1, 0.1, 0.1, 0.1], "alignment": "center",
-                    "alignment_margin_back": 0.02, "extra_leg_offset": 0.0,
-                    "leg_shape": "other", "leg_size": 0.05,
-                    "foot_radius": 0.025, "cargo_to_jack_front_edge_min_distance": 0.05,
-                }]}, timeout=5,
+                json={"rack.specs": [
+                    {
+                        "width": 0.83, "depth": 0.87,
+                        "margin": [0.1, 0.1, 0.1, 0.1], "alignment": "center",
+                        "alignment_margin_back": 0.02, "extra_leg_offset": 0.0,
+                        "leg_shape": "other", "leg_size": 0.05,
+                        "foot_radius": 0.025, "cargo_to_jack_front_edge_min_distance": 0.05,
+                    },
+                    {
+                        "width": 0.63, "depth": 0.67,
+                        "margin": [0.1, 0.1, 0.1, 0.1], "alignment": "center",
+                        "alignment_margin_back": 0.02, "extra_leg_offset": 0.0,
+                        "leg_shape": "other", "leg_size": 0.05,
+                        "foot_radius": 0.025, "cargo_to_jack_front_edge_min_distance": 0.05,
+                    },
+                ]}, timeout=5,
             )
             logger.info(f"[sync-overlays] rack.specs 자동 설정 완료 → {robot_ip}")
         except Exception as e:

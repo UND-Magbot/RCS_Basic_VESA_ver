@@ -1,9 +1,27 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { IconButton } from "../ui/IconButton";
 import { AlarmPopover } from "./AlarmPopover";
 import { UserDropdown } from "./UserDropdown";
 import type { TopBarProps } from "@/lib/types/shell";
 
+const DEFAULT_NAME = "UND RCS";
+
 export function TopBar({ dateTime, onToggleNav, navExpanded }: TopBarProps) {
+  const [systemName, setSystemName] = useState(DEFAULT_NAME);
+
+  useEffect(() => {
+    const saved = typeof window !== "undefined" ? localStorage.getItem("system_name") : null;
+    if (saved) setSystemName(saved);
+    const onChange = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (typeof detail === "string") setSystemName(detail || DEFAULT_NAME);
+    };
+    window.addEventListener("system-name-change", onChange as EventListener);
+    return () => window.removeEventListener("system-name-change", onChange as EventListener);
+  }, []);
+
   return (
     <header
       className="top-bar"
@@ -22,7 +40,7 @@ export function TopBar({ dateTime, onToggleNav, navExpanded }: TopBarProps) {
           </IconButton>
         ) : null}
       </div>
-      <h2 className="top-bar__center">UND RCS</h2>
+      <h2 className="top-bar__center">{systemName}</h2>
       <div className="top-bar__right">
         <span className="top-bar__datetime">{dateTime}</span>
         <AlarmPopover iconSrc="/icon/Icon_v2 (41).png" />

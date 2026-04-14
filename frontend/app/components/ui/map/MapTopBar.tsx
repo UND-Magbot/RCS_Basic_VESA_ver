@@ -123,25 +123,6 @@ export function MapTopBar({
               ))}
             </select>
           </label>
-          {selectedArea && (
-            <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 13, cursor: "pointer" }}>
-              <input
-                type="checkbox"
-                checked={areas.find((a) => String(a.area_id) === selectedArea)?.is_main_floor !== false}
-                onChange={async (e) => {
-                  try {
-                    await apiFetch(`/api/map/areas/${selectedArea}`, {
-                      method: "PATCH",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ is_main_floor: e.target.checked }),
-                    });
-                    onAreaUpdated?.();
-                  } catch {}
-                }}
-              />
-              메인층
-            </label>
-          )}
         </div>
 
         <div className="map-top-bar__center">

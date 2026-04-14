@@ -45,6 +45,7 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
   const [pois, setPois] = useState<PoiOption[]>([]);
   const [pickupId, setPickupId] = useState<number>(0);
   const [dropoffId, setDropoffId] = useState<number>(0);
+  const [workMode, setWorkMode] = useState<"rack_pickup" | "delivery_no_rack" | "simple_move">("rack_pickup");
   const [currentJob, setCurrentJob] = useState<JackJob | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -79,7 +80,7 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
       const res = await fetch(`${API}/api/tasks/manual-run-pois`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ robot_id: robotId, pickup_poi_id: pickupId, dropoff_poi_id: dropoffId, manual_confirm: true }),
+        body: JSON.stringify({ robot_id: robotId, pickup_poi_id: pickupId, dropoff_poi_id: dropoffId, manual_confirm: true, work_mode: workMode }),
       });
       if (res.status === 409) {
         setCurrentJob({ job_id: "", status: "error", message: "로봇이 이미 작업 중입니다" });
@@ -169,7 +170,21 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
 
 
         <label className="jack-test-panel__label">
-          픽업 위치
+          작업 종류
+          <select
+            className="jack-test-panel__select"
+            value={workMode}
+            onChange={(e) => setWorkMode(e.target.value as typeof workMode)}
+            disabled={isRunning}
+          >
+            <option value="rack_pickup">랙 픽업 (W1 → 배달 → 복귀)</option>
+            <option value="delivery_no_rack">배달 (랙 없이)</option>
+            <option value="simple_move">단순 이동</option>
+          </select>
+        </label>
+
+        <label className="jack-test-panel__label">
+          {workMode === "simple_move" ? "시작 위치" : "픽업 위치"}
           <select
             className="jack-test-panel__select"
             value={pickupId}
@@ -184,7 +199,7 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
         </label>
 
         <label className="jack-test-panel__label">
-          드롭오프 위치
+          {workMode === "simple_move" ? "도착 위치" : "드롭오프 위치"}
           <select
             className="jack-test-panel__select"
             value={dropoffId}

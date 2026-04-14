@@ -9,9 +9,12 @@ export type TaskRouteWaypoint = {
   world_y?: number;
 };
 
+export type WorkMode = "rack_pickup" | "delivery_no_rack" | "simple_move";
+
 export type TaskRoute = {
   id: number;
   name: string;
+  work_mode?: WorkMode;
   waypoints: TaskRouteWaypoint[];
   is_active: boolean;
   created_at: string | null;
@@ -19,6 +22,7 @@ export type TaskRoute = {
 
 export type TaskRouteCreate = {
   name: string;
+  work_mode?: WorkMode;
   waypoints: { poi_id: number; order: number; waypoint_type: string; wait_sec?: number }[];
 };
 

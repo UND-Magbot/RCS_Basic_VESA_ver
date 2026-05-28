@@ -14,11 +14,28 @@ from app.models.task import ScheduledTask, TaskHistory, TaskRoute, TaskRouteWayp
 from app.models.map import MapPOI
 from app.models.robot import Robot
 from app.services.jack_service import run_jack_job, run_route_job
+from app.services import poi_lock
 
 logger = logging.getLogger(__name__)
 
 scheduler = BackgroundScheduler()
 _running_robots: set[int] = set()
+import threading as _threading_lock
+_running_robots_lock = _threading_lock.Lock()
+
+
+def _try_mark_running(robot_id: int) -> bool:
+    """원자적으로 robot 작업 시작 표시. 이미 실행 중이면 False."""
+    with _running_robots_lock:
+        if robot_id in _running_robots:
+            return False
+        _running_robots.add(robot_id)
+        return True
+
+
+def _unmark_running(robot_id: int) -> None:
+    with _running_robots_lock:
+        _running_robots.discard(robot_id)
 
 # 요일 매핑: 1=월 ~ 7=일
 DOW_MAP = {"1": "mon", "2": "tue", "3": "wed", "4": "thu", "5": "fri", "6": "sat", "7": "sun"}
@@ -132,41 +149,39 @@ def get_next_run_time(task_id: int) -> datetime | None:
 
 
 def _return_rack_to_standby(robot_ip: str):
-    """마지막 드롭오프 위치에서 랙을 다시 들어서 대기장소(W1)에 내려놓기"""
+    """마지막 드롭오프 위치에서 빈 랙을 다시 들어서 랙 위치 (standby POI) 에 보관."""
     from app.services.jack_service import (
-        create_move, wait_move, jack_up, jack_down,
+        create_move, wait_move, safe_move, jack_up, jack_down,
         _get_standby_poi, update_job_status, JACK_WAIT_SEC,
         _interruptible_sleep,
     )
 
     standby = _get_standby_poi()
     if not standby:
-        logger.info("[scheduler] 대기장소 POI 없음, 랙 복귀 생략")
+        logger.info("[scheduler] 랙 위치 POI 없음, 랙 복귀 생략")
         return
 
     try:
-        update_job_status(robot_ip, status="aligning", message="랙 복귀를 위해 잭 올리는 중...")
+        update_job_status(robot_ip, status="aligning", message="랙 위치로 복귀 위해 잭 올리는 중...")
 
-        # 현재 위치에서 align_with_rack (마지막 드롭오프 위치)
-        # 바로 잭 업 시도
+        # 현재 위치(마지막 드롭오프) 에서 바로 잭 업 (랙 다시 들기)
         jack_up(robot_ip)
         _interruptible_sleep(robot_ip, JACK_WAIT_SEC)
 
-        # W1으로 이동
-        update_job_status(robot_ip, status="moving", message=f"대기장소({standby['name']})로 랙 복귀 중...")
-        move_id = create_move(robot_ip, "to_unload_point", standby["x"], standby["y"], standby.get("ori", 0))
-        wait_move(robot_ip, move_id, timeout=120)
+        # 랙 위치로 이동
+        update_job_status(robot_ip, status="moving", message=f"랙 위치({standby['name']})로 복귀 중...")
+        safe_move(robot_ip, "to_unload_point", standby["x"], standby["y"], standby.get("ori", 0), timeout=120)
 
-        # 잭 다운
-        update_job_status(robot_ip, status="jacking_down", message=f"대기장소({standby['name']}) 잭 내리는 중...")
+        # 잭 다운 (랙 보관)
+        update_job_status(robot_ip, status="jacking_down", message=f"랙 위치({standby['name']}) 잭 내리는 중...")
         jack_down(robot_ip)
         _interruptible_sleep(robot_ip, JACK_WAIT_SEC)
 
-        logger.info(f"[scheduler] 대기장소 랙 복귀 완료: {standby['name']}")
+        logger.info(f"[scheduler] 랙 위치 복귀 완료: {standby['name']}")
     except Exception as e:
-        logger.error(f"[scheduler] 대기장소 랙 복귀 실패: {e}")
+        logger.error(f"[scheduler] 랙 위치 복귀 실패: {e}")
         from app.crud.activity_log import log_activity
-        log_activity("robot", "move_error", f"대기장소 랙 복귀 실패: {str(e)}", source="scheduler")
+        log_activity("robot", "move_error", f"랙 위치 복귀 실패: {str(e)}", source="scheduler")
 
 
 def _return_to_charger(robot_ip: str, wp_list: list[dict]):
@@ -222,26 +237,36 @@ def _return_to_charger(robot_ip: str, wp_list: list[dict]):
 
     logger.info(f"[scheduler] 충전소 복귀: {charger['name']}")
     try:
-        from app.services.jack_service import create_move, wait_move, update_job_status
+        from app.services.jack_service import create_move, wait_move, safe_move, update_job_status
         import time as _time
         import math as _math
         update_job_status(robot_ip, status="returning", detail="작업 완료 후 충전소로 복귀 중...")
-        # DB 충전소 좌표 직접 사용
+        # DB 충전소 좌표 = 도킹 지점. yaw 는 로봇이 충전기를 바라볼 방향.
         cx, cy = charger["x"], charger["y"]
         cyaw = charger.get("ori", 0)
 
-        # 1단계: standard로 충전소 근처 이동
-        try:
-            std_move = create_move(robot_ip, "standard", cx, cy, cyaw)
-            wait_move(robot_ip, std_move, timeout=120)
-        except RuntimeError:
-            # 중지 명령 — 충전소 복귀도 중단
-            raise
-        except Exception:
-            pass
-        _time.sleep(3)
+        # 사전 접근 지점 (도킹 지점에서 yaw 반대 방향 60cm)
+        APPROACH_DIST = 0.6  # m
+        approach_x = cx - APPROACH_DIST * _math.cos(cyaw)
+        approach_y = cy - APPROACH_DIST * _math.sin(cyaw)
 
-        # 2단계: charge로 도킹 (재시도)
+        # 1단계: standard 사전 접근 — best-effort (실패해도 charge 로 직접 진행)
+        # `failed to calc global path` 등 경로 계산 불가 케이스가 자주 발생하므로 무한 재시도 X.
+        try:
+            std_move = create_move(robot_ip, "standard", approach_x, approach_y, cyaw)
+            std_result = wait_move(robot_ip, std_move, timeout=60)
+            if std_result.get("state") != "succeeded":
+                logger.warning(
+                    f"[scheduler] 사전 접근 실패({std_result.get('fail_message') or std_result.get('state')}) "
+                    f"— charge 단계로 직접 진행"
+                )
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.warning(f"[scheduler] 사전 접근 예외: {e} — charge 단계로 직접 진행")
+        _time.sleep(2)
+
+        # 2단계: charge로 도킹 (target_ori 명시, 재시도)
         for attempt in range(5):
             try:
                 move_id = create_move(robot_ip, "charge", cx, cy, cyaw, charge_retry_count=3)
@@ -287,12 +312,11 @@ def execute_scheduled_task(task_id: int):
             log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 실패: 로봇을 찾을 수 없습니다", source="scheduler")
             return
 
-        if robot.id in _running_robots:
+        if not _try_mark_running(robot.id):
             logger.warning(f"[scheduler] Robot {robot.id} busy, skipping task {task_id}")
             from app.crud.activity_log import log_activity
             log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 건너뜀: 로봇이 작업 중입니다", source="scheduler")
             return
-        _running_robots.add(robot.id)
 
         # 경로 웨이포인트에서 POI 추출
         waypoints = db.query(TaskRouteWaypoint).filter(
@@ -307,6 +331,7 @@ def execute_scheduled_task(task_id: int):
             if not poi:
                 continue
             wp_data = {
+                "poi_id": poi.id,
                 "name": poi.name,
                 "x": poi.world_x,
                 "y": poi.world_y,
@@ -325,7 +350,22 @@ def execute_scheduled_task(task_id: int):
             logger.error(f"[scheduler] Not enough waypoints for route {route.id}")
             from app.crud.activity_log import log_activity
             log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 실패: 경로에 웨이포인트가 부족합니다", source="scheduler")
-            _running_robots.discard(robot.id)
+            _unmark_running(robot.id)
+            return
+
+        # POI 락 — 같은 POI를 다른 로봇이 잡고 있으면 작업 skip
+        lock_pids = [w.get("poi_id") for w in wp_list]
+        if getattr(robot, "charging_id", None):
+            lock_pids.append(robot.charging_id)
+        if getattr(robot, "standby_id", None):
+            lock_pids.append(robot.standby_id)
+        ok, conflict_pid = poi_lock.try_acquire(lock_pids, robot.id)
+        if not ok:
+            owner = poi_lock.get_owner(conflict_pid)
+            logger.warning(f"[scheduler] POI {conflict_pid} busy (robot={owner}), skipping task {task_id}")
+            from app.crud.activity_log import log_activity
+            log_activity("robot", "task_error", f"스케줄 '{task.name}' 실행 건너뜀: POI를 다른 로봇이 사용 중", source="scheduler")
+            _unmark_running(robot.id)
             return
 
         # 이력 생성
@@ -355,7 +395,9 @@ def execute_scheduled_task(task_id: int):
 
     except Exception as e:
         logger.exception(f"[scheduler] Error preparing task {task_id}: {e}")
-        _running_robots.discard(getattr(robot, 'id', -1) if 'robot' in dir() else -1)
+        _rid = getattr(robot, 'id', -1) if 'robot' in dir() else -1
+        _unmark_running(_rid)
+        poi_lock.release_all_by_robot(_rid)
         db.close()
         return
     db.close()
@@ -398,7 +440,8 @@ def execute_scheduled_task(task_id: int):
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=skip_standby_pickup,
                                skip_standby_return=skip_standby_return,
-                               work_mode=getattr(route, "work_mode", "rack_pickup"))
+                               work_mode=getattr(route, "work_mode", "rack_pickup"),
+                               robot_id=robot_id)
 
         db_h2 = SessionLocal()
         try:
@@ -420,7 +463,8 @@ def execute_scheduled_task(task_id: int):
         result = run_route_job(robot_ip, wp_list,
                                skip_standby_pickup=False,
                                skip_standby_return=has_repeat,
-                               work_mode=getattr(route, "work_mode", "rack_pickup"))
+                               work_mode=getattr(route, "work_mode", "rack_pickup"),
+                               robot_id=robot_id)
         db2 = SessionLocal()
         try:
             h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
@@ -440,7 +484,7 @@ def execute_scheduled_task(task_id: int):
             if result["status"] != "done":
                 break
 
-        # 반복 종료 후 마지막 드롭오프에서 W1으로 랙 복귀
+        # 반복 종료 후 마지막 드롭오프에서 랙 위치(standby POI) 로 복귀
         if has_repeat and result["status"] == "done":
             _return_rack_to_standby(robot_ip)
 
@@ -461,4 +505,5 @@ def execute_scheduled_task(task_id: int):
         finally:
             db2.close()
     finally:
-        _running_robots.discard(robot_id)
+        _unmark_running(robot_id)
+        poi_lock.release_all_by_robot(robot_id)

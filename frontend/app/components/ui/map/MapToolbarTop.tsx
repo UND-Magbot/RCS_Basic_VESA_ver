@@ -1,31 +1,24 @@
 "use client";
 
-import type { MapToolbarTopProps } from "@/lib/types/map";
+import type { MapTool, MapToolbarTopProps } from "@/lib/types/map";
 
-const toolbarItems = [
-  { key: "undo", icon: "↩", label: "되돌리기" },
-  { key: "charging", icon: "⚡", label: "충전소 생성" },
-  { key: "location", icon: "◎", label: "현 위치에서 포인트 생성" },
+// 모드 토글 도구 (캔버스 클릭으로 위치 지정)
+const modeTools: { key: MapTool; icon: string; label: string }[] = [
+  { key: "point", icon: "●", label: "포인트" },
+  { key: "jackPoint", icon: "⚑", label: "작업 포인트" },
+  { key: "virtualwall", icon: "▯", label: "가상벽" },
+  { key: "del", icon: "✕", label: "삭제" },
 ];
 
 export function MapToolbarTop({
   onUndo,
   onFullscreen,
   isFullscreen,
+  activeTool,
+  onToolChange,
   onChargingPile,
   onCurrentPos,
-  onCurrentPosJack,
-  onFirewall,
 }: MapToolbarTopProps) {
-  const handleClick = (key: string) => {
-    switch (key) {
-      case "undo": return onUndo();
-      case "charging": return onChargingPile();
-      case "firewall": return onFirewall();
-      case "location": return onCurrentPos();
-    }
-  };
-
   return (
     <>
       <button
@@ -38,17 +31,52 @@ export function MapToolbarTop({
 
       <div className="map-toolbar-top">
         <div className="map-toolbar-top__bar">
-          {toolbarItems.map((item) => (
+          {/* 되돌리기 — 즉시 실행 */}
+          <button
+            className="map-toolbar-top__item"
+            onClick={onUndo}
+            title="되돌리기"
+          >
+            <span className="map-toolbar-top__item-icon">↩</span>
+            되돌리기
+          </button>
+
+          {/* 모드 도구들 */}
+          {modeTools.map((t) => (
             <button
-              key={item.key}
-              className="map-toolbar-top__item"
-              onClick={() => handleClick(item.key)}
-              title={item.label}
+              key={t.key}
+              className={
+                activeTool === t.key
+                  ? "map-toolbar-top__item map-toolbar-top__item--active"
+                  : "map-toolbar-top__item"
+              }
+              onClick={() => onToolChange(t.key)}
+              title={t.label}
             >
-              <span className="map-toolbar-top__item-icon">{item.icon}</span>
-              {item.label}
+              <span className="map-toolbar-top__item-icon">{t.icon}</span>
+              {t.label}
             </button>
           ))}
+
+          {/* 충전소 — 로봇 현재 위치에 즉시 생성 */}
+          <button
+            className="map-toolbar-top__item"
+            onClick={onChargingPile}
+            title="로봇 현재 위치에 충전소 자동 생성"
+          >
+            <span className="map-toolbar-top__item-icon">⚡</span>
+            충전소
+          </button>
+
+          {/* 현 위치 — 로봇 현재 위치에 일반 POI 즉시 생성 */}
+          <button
+            className="map-toolbar-top__item"
+            onClick={onCurrentPos}
+            title="로봇 현재 위치에 포인트 자동 생성"
+          >
+            <span className="map-toolbar-top__item-icon">◎</span>
+            현 위치
+          </button>
         </div>
       </div>
     </>

@@ -6,7 +6,6 @@ import { SideNav, defaultNavItems } from "../components/shell/SideNav";
 import { MapTopBar } from "../components/ui/map/MapTopBar";
 import { MapCanvas } from "../components/ui/map/MapCanvas";
 import { MapToolbarTop } from "../components/ui/map/MapToolbarTop";
-import { MapToolbarLeft } from "../components/ui/map/MapToolbarLeft";
 import { MapFloatingPanel } from "../components/ui/map/MapFloatingPanel";
 import { RobotConnectModal } from "../components/ui/map/RobotConnectModal";
 import { MappingSetupModal } from "../components/ui/map/MappingSetupModal";
@@ -19,6 +18,7 @@ import { LineEditPopup } from "../components/ui/map/LineEditPopup";
 import type {
   MapTool,
   POI,
+  POIType,
   PathLine,
   PolygonShape,
   LineDirection,
@@ -27,6 +27,9 @@ import type {
   MapMeta,
 } from "@/lib/types/map";
 import { apiFetch } from "@/lib/api";
+import {
+  getStoredBusiness, getStoredArea, setStoredBusiness, setStoredArea,
+} from "@/lib/util/selectedScope";
 import { ConfirmModal } from "../components/ui/robots/ConfirmModal";
 import { useAlert } from "@/lib/context/AlertContext";
 import "./map.css";
@@ -74,6 +77,30 @@ function syncNextId(ids: string[]) {
     const num = parseInt(id.split("-")[1] ?? "0", 10);
     if (num >= nextId) nextId = num + 1;
   }
+}
+
+// POI 타입별 자동 이름 prefix
+const POI_NAME_PREFIX: Record<string, string> = {
+  charging: "C",
+  jack: "J",
+  standby: "R",   // Rack 위치
+  waypoint: "W",  // Waypoint
+};
+
+/** 같은 타입의 기존 POI 이름에서 'PrefixN' 패턴을 찾아 max+1 번호의 이름을 생성. */
+function nextPoiName(pois: POI[], type: POIType): string {
+  const prefix = POI_NAME_PREFIX[type] || "P";
+  const re = new RegExp(`^${prefix}(\\d+)$`);
+  let maxN = 0;
+  for (const p of pois) {
+    if (p.type !== type) continue;
+    const m = p.name?.match(re);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > maxN) maxN = n;
+    }
+  }
+  return `${prefix}${maxN + 1}`;
 }
 
 export default function MapPage() {
@@ -183,13 +210,38 @@ export default function MapPage() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // 사업장 목록 로드 (첫 번째 사업장 자동 선택)
+  // 마지막 선택 사업장·영역을 다른 페이지와 공유
+  useEffect(() => { setStoredBusiness(selectedBusiness); }, [selectedBusiness]);
+  useEffect(() => { setStoredArea(selectedArea); }, [selectedArea]);
+
+  // 사업장 목록 로드 — 백엔드 적용 default 영역 우선, 없으면 stored, 없으면 첫 번째
   useEffect(() => {
-    apiFetch<{ total: number; items: BusinessItem[] }>("/api/map/businesses")
-      .then((data) => {
+    Promise.all([
+      apiFetch<{ total: number; items: BusinessItem[] }>("/api/map/businesses"),
+      fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/map/default-area`)
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null) as Promise<{ area_id: number | null; business_id: number | null } | null>,
+    ])
+      .then(([data, defaultArea]) => {
         setBusinesses(data.items);
         if (!selectedBusiness && data.items.length > 0) {
-          setSelectedBusiness(String(data.items[0].business_id));
+          // 1) 백엔드의 default 영역에 매칭되는 사업장 우선
+          let target: BusinessItem | undefined;
+          if (defaultArea?.business_id != null) {
+            target = data.items.find((b) => b.business_id === defaultArea.business_id);
+          }
+          // 2) localStorage 사업장
+          if (!target) {
+            const stored = getStoredBusiness();
+            if (stored) target = data.items.find((b) => String(b.business_id) === stored);
+          }
+          // 3) 첫 번째
+          if (!target) target = data.items[0];
+          setSelectedBusiness(String(target.business_id));
+          // default 영역도 stored 에 미리 반영 → 영역 useEffect 가 그 값을 우선 선택
+          if (defaultArea?.area_id != null) {
+            setStoredArea(String(defaultArea.area_id));
+          }
         }
       })
       .catch((err) => {
@@ -215,7 +267,12 @@ export default function MapPage() {
       .then((data) => {
         setAreas(data.items);
         if (data.items.length > 0) {
-          setSelectedArea(String(data.items[data.items.length - 1].area_id));
+          // 마지막 사용 영역 우선, 없으면 가장 최근 추가된 영역(맨 마지막 row)
+          const stored = getStoredArea();
+          const found = stored
+            ? data.items.find((a) => String(a.area_id) === stored)
+            : null;
+          setSelectedArea(String((found ?? data.items[data.items.length - 1]).area_id));
         } else {
           setSelectedArea("");
         }
@@ -244,9 +301,9 @@ export default function MapPage() {
     )
       .then((data) => {
         setAreaMaps(data.items);
-        // 최신 맵의 이미지를 자동으로 로드
-        if (data.items.length > 0 && data.items[data.items.length - 1].image_url) {
-          const map = data.items[data.items.length - 1];
+        // 백엔드가 id.desc() 정렬 — 첫 번째가 최신 맵
+        if (data.items.length > 0 && data.items[0].image_url) {
+          const map = data.items[0];
           setSelectedMapId(map.id);
           setSelectedMappingId(map.mapping_id);
           const imgUrl = map.image_url!;
@@ -277,6 +334,7 @@ export default function MapPage() {
                 robotSns: p.robotSns ?? undefined,
                 address: p.address ?? undefined,
                 dockingRadius: p.dockingRadius ?? undefined,
+                rackSize: p.rackSize ?? undefined,
               }));
               const loadedLines = elems.lines.map((l: any) => ({
                 id: l.id,
@@ -421,7 +479,7 @@ export default function MapPage() {
           id: generateId("poi"),
           x,
           y,
-          name: `POINT${pois.length + 1}`,
+          name: nextPoiName(pois, "waypoint"),
           type: "waypoint",
         };
         setPois((prev) => [...prev, newPOI]);
@@ -438,13 +496,13 @@ export default function MapPage() {
           return;
         }
         pushHistory();
-        const jackCount = pois.filter((p) => p.type === "jack").length;
         const newPOI: POI = {
           id: generateId("poi"),
           x,
           y,
-          name: `J${jackCount + 1}`,
+          name: nextPoiName(pois, "jack"),
           type: "jack",
+          rackSize: "S600",
         };
         setPois((prev) => [...prev, newPOI]);
         setEditingPOI(newPOI);
@@ -469,7 +527,7 @@ export default function MapPage() {
             id: generateId("poi"),
             x,
             y,
-            name: `POINT${pois.length + 1}`,
+            name: nextPoiName(pois, "waypoint"),
             type: "waypoint",
           };
           setPois((prev) => [...prev, newPOI]);
@@ -739,9 +797,10 @@ export default function MapPage() {
       const isCharging = tool === "chargingPile";
       const isJack = tool === "currentPosJack";
 
-      // 충전소: 로봇 도킹 위치에서 yaw 반대 방향 0.3m 뒤 = 충전기 위치
+      // 충전소: 로봇 도킹 위치에서 yaw 방향(앞쪽=충전기 반대) 0.2m 앞에 POI 생성
+      //         → 도킹 시 로봇이 충전기에 너무 가까이 붙어서 긁는 것 방지
       // 일반/잭킹 POI: 로봇 현재 위치 그대로 사용
-      const DOCKING_OFFSET = 0.2;
+      const DOCKING_OFFSET = -0.1;
       const angle = robotPose.ori;
       const worldX = isCharging
         ? robotPose.pos[0] - DOCKING_OFFSET * Math.cos(angle)
@@ -756,18 +815,11 @@ export default function MapPage() {
       const svgX = ipx - mapImageSize.w / 2;
       const svgY = ipy - mapImageSize.h / 2;
 
-      let poiName: string;
       let poiType: POI["type"];
-      if (isCharging) {
-        poiName = `CHARGE${pois.filter((p) => p.type === "charging").length + 1}`;
-        poiType = "charging";
-      } else if (isJack) {
-        poiName = `J${pois.filter((p) => p.type === "jack").length + 1}`;
-        poiType = "jack";
-      } else {
-        poiName = `CURPOS${pois.length + 1}`;
-        poiType = "waypoint";
-      }
+      if (isCharging) poiType = "charging";
+      else if (isJack) poiType = "jack";
+      else poiType = "waypoint";
+      const poiName: string = nextPoiName(pois, poiType);
 
       const newPOI: POI = {
         id: generateId("poi"),
@@ -776,6 +828,7 @@ export default function MapPage() {
         name: poiName,
         type: poiType,
         angle,
+        ...(poiType === "jack" ? { rackSize: "S600" as const } : {}),
       };
       setPois((prev) => [...prev, newPOI]);
       setEditingPOI(newPOI);
@@ -926,6 +979,41 @@ export default function MapPage() {
     setSyncModalOpen(true);
   };
   const handleRelocalize = () => setRelocalizeModalOpen(true);
+
+  // 현재 선택된 영역을 모니터링 메인의 default 로 적용
+  const handleApply = async () => {
+    if (!selectedArea) {
+      showInfo("안내", "적용할 영역을 먼저 선택해 주세요.");
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/api/map/default-area/${selectedArea}`,
+        { method: "POST" }
+      );
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({} as any));
+        showAlert({
+          title: "적용 실패",
+          message: data?.detail || `HTTP ${res.status}`,
+        });
+        return;
+      }
+      const data = await res.json();
+      // 다른 페이지(모니터링)와도 동일하게 동기화되도록 localStorage 도 갱신
+      setStoredBusiness(selectedBusiness);
+      setStoredArea(selectedArea);
+      const areaName = areas.find((a) => String(a.area_id) === selectedArea)?.name ?? "";
+      showAlert({
+        title: "적용 완료",
+        message: `'${areaName}' 영역의 맵('${data.map_name ?? ""}')이 모니터링 메인 기본 맵으로 적용되었습니다.`,
+      });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "적용 실패";
+      showAlert({ title: "오류", message: msg });
+    }
+  };
+
   const handleCreate = () => console.log("Create");
   const handleDelete = () => {
     if (!selectedArea) {
@@ -982,9 +1070,12 @@ export default function MapPage() {
         );
         setAreas(areaData.items);
 
-        // 첫 번째 영역 자동 선택 (영역이 없었다면)
-        if (!selectedArea && areaData.items.length > 0) {
-          setSelectedArea(String(areaData.items[0].area_id));
+        // 방금 매핑한 영역이 있으면 우선 선택, 없으면 첫 번째 영역
+        const targetAreaId = mappingAreaId && areaData.items.some((a) => String(a.area_id) === mappingAreaId)
+          ? mappingAreaId
+          : (!selectedArea && areaData.items.length > 0 ? String(areaData.items[0].area_id) : "");
+        if (targetAreaId && targetAreaId !== selectedArea) {
+          setSelectedArea(targetAreaId);
           return; // selectedArea 변경 시 useEffect가 맵 로드 처리
         }
       }
@@ -1019,10 +1110,11 @@ export default function MapPage() {
             `/api/map/maps/${map.id}/elements`
           );
           setPois(elems.pois.map((p: any) => ({
-            id: p.id, name: p.name, x: p.x, y: p.y, type: p.poi_type || "waypoint",
+            id: p.id, name: p.name, x: p.x, y: p.y, type: p.poi_type || p.type || "waypoint",
             phoneNumber: p.phone_number || "", angle: p.angle ?? null,
             loadType: p.load_type || "normal", robotSns: p.robot_sns ? JSON.parse(p.robot_sns) : [],
             dockingRadius: p.docking_radius ?? null,
+            rackSize: p.rackSize ?? p.rack_size ?? undefined,
           })));
           setLines(elems.lines?.map((l: any) => ({
             id: l.id, fromId: l.from_poi_id, toId: l.to_poi_id,
@@ -1072,9 +1164,11 @@ export default function MapPage() {
               onAreaChange={setSelectedArea}
               onSave={handleSave}
               onSync={handleSync}
+              onApply={handleApply}
               onRelocalize={handleRelocalize}
               onDelete={handleDelete}
               syncDisabled={!selectedMapId || !selectedMappingId}
+              applyDisabled={!selectedArea || !selectedMapId}
               onBusinessCreated={(id, name) => {
                 setBusinesses((prev) => [...prev, { business_id: id, name }]);
                 setSelectedBusiness(String(id));
@@ -1113,21 +1207,15 @@ export default function MapPage() {
                 onImageLoad={(w, h) => setMapImageSize({ w, h })}
               />
 
-              {/* Toolbar: Top (horizontal) */}
+              {/* Toolbar: 단일 가로 줄 — 되돌리기 + 모드 도구 + 충전소 + 현위치 */}
               <MapToolbarTop
                 onUndo={handleUndo}
                 onFullscreen={handleFullscreen}
                 isFullscreen={isFullscreen}
-                onChargingPile={() => handleToolChange("chargingPile")}
-                onCurrentPos={() => handleToolChange("currentPos")}
-                onCurrentPosJack={() => handleToolChange("currentPosJack")}
-                onFirewall={() => handleToolChange("firewall")}
-              />
-
-              {/* Toolbar: Left (vertical) */}
-              <MapToolbarLeft
                 activeTool={activeTool}
                 onToolChange={handleToolChange}
+                onChargingPile={() => handleToolChange("chargingPile")}
+                onCurrentPos={() => handleToolChange("currentPos")}
               />
 
               {/* Floating Panel: Right */}
@@ -1170,6 +1258,7 @@ export default function MapPage() {
                   poi={editingPOI}
                   onUpdate={handlePOIUpdate}
                   onDelete={handlePOIDelete}
+                  getNextNameForType={(t) => nextPoiName(pois, t)}
                   onClose={() => {
                     if (pendingPOIId) {
                       setPois((prev) => prev.filter((p) => p.id !== pendingPOIId));

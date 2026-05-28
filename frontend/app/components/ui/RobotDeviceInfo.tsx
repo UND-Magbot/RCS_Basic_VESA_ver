@@ -44,6 +44,8 @@ export function RobotDeviceInfo({
   const [isApplying, setIsApplying] = useState(false);
   const [robotSpeed, setRobotSpeed] = useState(1.2);
   const [initialSpeed, setInitialSpeed] = useState(1.2);
+  const [robotType, setRobotType] = useState<string>("lifting");
+  const [initialRobotType, setInitialRobotType] = useState<string>("lifting");
   const [poiDropdownOpen, setPoiDropdownOpen] = useState(false);
   const [poiDropdownPos, setPoiDropdownPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const poiDropdownRef = useRef<HTMLDivElement>(null);
@@ -52,6 +54,9 @@ export function RobotDeviceInfo({
 
   useEffect(() => {
     if (!device) return;
+    const type = (device as any).robotType || "lifting";
+    setRobotType(type);
+    setInitialRobotType(type);
     const controller = new AbortController();
 
     fetch(
@@ -186,13 +191,26 @@ export function RobotDeviceInfo({
         console.error("[로봇 상세] 속도 저장 오류:", err);
       }
     }
+    // 로봇 종류 저장
+    if (robotType !== initialRobotType) {
+      try {
+        await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/robots/${device.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ robot_type: robotType }),
+        });
+        setInitialRobotType(robotType);
+      } catch (err) {
+        console.error("[로봇 상세] 로봇 종류 저장 오류:", err);
+      }
+    }
     try {
       showAlert({ title: "완료", message: "설정이 저장되었습니다." });
     } catch {
     } finally {
       setIsApplying(false);
     }
-  }, [device, minBattery, chargingId, standbyId, robotSpeed, isApplying, showAlert]);
+  }, [device, minBattery, chargingId, standbyId, robotSpeed, robotType, initialRobotType, isApplying, showAlert]);
 
   if (!device) return null;
 
@@ -201,7 +219,8 @@ export function RobotDeviceInfo({
     (initialMinBattery !== null && minBattery !== initialMinBattery) ||
     (showChargingStation && chargingId !== initialChargingId) ||
     standbyId !== initialStandbyId ||
-    robotSpeed !== initialSpeed;
+    robotSpeed !== initialSpeed ||
+    robotType !== initialRobotType;
 
   const shouldScrollTaskTable = device.currentTask.length > 5;
 
@@ -309,6 +328,19 @@ export function RobotDeviceInfo({
             </div> */}
           </div>
 
+          <div className="robot-info__charging-row">
+            <span className="robot-info__label">로봇 종류</span>
+            <select
+              value={robotType}
+              disabled={readOnly}
+              onChange={(e) => setRobotType(e.target.value)}
+              style={{ flex: 1, padding: "6px 10px", background: "var(--bg-surface-2)", border: "1px solid var(--border-color)", borderRadius: 6, color: "var(--text-primary)" }}
+            >
+              <option value="lifting">리프팅 (모든 작업)</option>
+              <option value="serving">서빙 (단순 이동만)</option>
+            </select>
+          </div>
+
           <div className="robot-info__battery-row">
             <span className="robot-info__label">최소 배터리</span>
             <input
@@ -362,7 +394,7 @@ export function RobotDeviceInfo({
                 </select>
               </div>
               <div className="robot-info__charging-row">
-                <span className="robot-info__label">랙 위치(W1)</span>
+                <span className="robot-info__label">랙 위치</span>
                 <select
                   className="robot-info__native-select"
                   value={standbyId ?? ""}

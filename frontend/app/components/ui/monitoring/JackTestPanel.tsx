@@ -1,15 +1,16 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-import { apiFetch } from "@/lib/api";
+import { useState, useEffect, useRef } from "react";
+import { ROBOT_TYPE_WORK_MODES, WORK_MODE_LABELS, type WorkMode, type RobotType } from "@/lib/constants/robotTypes";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "";
 
-type LiveRobot = { ID: number; IP: string; SN: string; ROBOTNAME: string; ONLINE: string; [key: string]: any };
+type LiveRobot = { ID: number; IP: string; SN: string; ROBOTNAME: string; ONLINE: string; ROBOT_TYPE?: string; [key: string]: any };
 type PoiOption = { id: number; name: string; type: string };
 
-type JackJob = {
-  job_id: string;
+type RobotJob = {
+  ip: string;
+  name: string;
   status: string;
   message: string;
 };
@@ -46,13 +47,20 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
   const [pickupId, setPickupId] = useState<number>(0);
   const [dropoffId, setDropoffId] = useState<number>(0);
   const [workMode, setWorkMode] = useState<"rack_pickup" | "delivery_no_rack" | "simple_move">("rack_pickup");
-  const [currentJob, setCurrentJob] = useState<JackJob | null>(null);
   const [isStarting, setIsStarting] = useState(false);
+  const [activeJobs, setActiveJobs] = useState<RobotJob[]>([]);
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const onlineRobots = liveRobots.filter((r) => r.ONLINE === "Online");
   const jackPois = pois.filter((p) => p.type === "jack");
 
+  // 로봇 이름 찾기
+  const getRobotName = (ip: string) => {
+    const r = liveRobots.find((x) => x.IP === ip);
+    return r?.ROBOTNAME || r?.SN || ip;
+  };
+
+  // POI 로드
   useEffect(() => {
     const url = areaId ? `${API}/api/map/active-pois?area_id=${areaId}` : `${API}/api/map/active-pois`;
     fetch(url)
@@ -61,16 +69,52 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
       .catch(() => {});
   }, [areaId]);
 
+  // 모든 로봇의 작업 상태 폴링
   useEffect(() => {
+    const poll = async () => {
+      const ips = onlineRobots.map((r) => r.IP);
+      const results: RobotJob[] = [];
+      await Promise.all(
+        ips.map(async (ip) => {
+          try {
+            const res = await fetch(`${API}/api/robots/job-status/${ip}`);
+            if (!res.ok) return;
+            const job = await res.json();
+            if (job.status && job.status !== "idle" && job.status !== "done") {
+              results.push({
+                ip,
+                name: getRobotName(ip),
+                status: job.status,
+                message: job.message || STATUS_LABELS[job.status] || job.status,
+              });
+            }
+          } catch {}
+        })
+      );
+      setActiveJobs(results);
+    };
+    poll();
+    pollingRef.current = setInterval(poll, 2000);
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveRobots]);
+
+  // 선택한 로봇의 타입에 따른 허용 work_mode
+  const selectedRobotType = (onlineRobots.find((r) => r.IP === robotIp)?.ROBOT_TYPE || "lifting") as RobotType;
+  const allowedWorkModes: WorkMode[] = ROBOT_TYPE_WORK_MODES[selectedRobotType] || ["simple_move"];
 
   const handleRobotChange = (ip: string) => {
     setRobotIp(ip);
     const robot = onlineRobots.find((r) => r.IP === ip);
     setRobotId(robot?.ID || 0);
+    // 로봇 타입이 현재 work_mode를 허용 안 하면 첫 번째 허용 모드로 변경
+    const newType = (robot?.ROBOT_TYPE || "lifting") as RobotType;
+    const allowed = ROBOT_TYPE_WORK_MODES[newType] || ["simple_move"];
+    if (!allowed.includes(workMode)) {
+      setWorkMode(allowed[0]);
+    }
   };
 
   const handleStart = async () => {
@@ -83,68 +127,83 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
         body: JSON.stringify({ robot_id: robotId, pickup_poi_id: pickupId, dropoff_poi_id: dropoffId, manual_confirm: true, work_mode: workMode }),
       });
       if (res.status === 409) {
-        setCurrentJob({ job_id: "", status: "error", message: "로봇이 이미 작업 중입니다" });
-        setIsStarting(false);
+        alert("로봇이 이미 작업 중입니다");
         return;
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const result = await res.json();
-      const histId = result.history_id;
-      setCurrentJob({ job_id: String(histId), status: "pending", message: "작업이 시작되었습니다." });
 
-      if (pollingRef.current) clearInterval(pollingRef.current);
-      pollingRef.current = setInterval(async () => {
-        try {
-          // 1) jack_service 실시간 상태 조회
-          if (robotIp) {
-            const jobRes = await fetch(`${API}/api/robots/job-status/${robotIp}`);
-            if (jobRes.ok) {
-              const job = await jobRes.json();
-              if (job.status && job.status !== "idle") {
-                setCurrentJob({ job_id: String(histId), status: job.status, message: job.message || STATUS_LABELS[job.status] || job.status });
-                return;
-              }
-            }
-          }
-          // 2) 작업 종료 후 이력에서 최종 상태 확인
-          const hist = await apiFetch<{ total: number; items: any[] }>(`/api/tasks/history/all?limit=5`);
-          const h = hist.items.find((item: any) => item.id === histId);
-          if (h) {
-            const status = h.status === "succeeded" ? "done" : h.status;
-            setCurrentJob({ job_id: String(histId), status, message: h.error_message || STATUS_LABELS[status] || status });
-            if (h.status === "succeeded" || h.status === "failed") {
-              if (pollingRef.current) {
-                clearInterval(pollingRef.current);
-                pollingRef.current = null;
-              }
-            }
-          }
-        } catch {}
-      }, 2000);
+      // 작업 시작 후 폼 초기화 (다른 로봇에 또 넣을 수 있게)
+      setRobotIp("");
+      setRobotId(0);
+      setPickupId(0);
+      setDropoffId(0);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "시작 실패";
-      setCurrentJob({ job_id: "", status: "error", message: msg });
+      alert(`시작 실패: ${msg}`);
     } finally {
       setIsStarting(false);
     }
   };
 
-  const isRunning =
-    currentJob != null &&
-    currentJob.status !== "done" &&
-    currentJob.status !== "error" &&
-    currentJob.status !== "failed" &&
-    currentJob.status !== "";
+  const handleStop = async (ip: string) => {
+    try {
+      await fetch(`${API}/api/robots/remote/stop-all/${ip}`, { method: "POST" });
+    } catch {}
+  };
 
-  const statusColor =
-    currentJob?.status === "done"
-      ? "var(--color-success)"
-      : currentJob?.status === "error"
-        ? "var(--color-error)"
-        : "var(--color-warning)";
+  const [pausedIps, setPausedIps] = useState<Set<string>>(new Set());
 
-  const pickupName = jackPois.find((p) => p.id === pickupId)?.name || "";
-  const dropoffName = jackPois.find((p) => p.id === dropoffId)?.name || "";
+  const handlePause = async (ip: string) => {
+    try {
+      await fetch(`${API}/api/robots/remote/pause/${ip}`, { method: "POST" });
+      setPausedIps((prev) => new Set(prev).add(ip));
+    } catch {}
+  };
+
+  const handleResume = async (ip: string) => {
+    try {
+      await fetch(`${API}/api/robots/remote/resume/${ip}`, { method: "POST" });
+      setPausedIps((prev) => {
+        const n = new Set(prev);
+        n.delete(ip);
+        return n;
+      });
+    } catch {}
+  };
+
+  const handleForceReturn = async (ip: string) => {
+    if (!confirm("강제 종료하시겠습니까?\n현재 위치에서 랙을 들고 원래 위치에 두고 충전소로 복귀합니다.")) return;
+    try {
+      await fetch(`${API}/api/robots/remote/force-return/${ip}`, { method: "POST" });
+    } catch {}
+  };
+
+  const handleConfirm = async (ip: string) => {
+    try {
+      await fetch(`${API}/api/robots/remote/confirm/${ip}`, { method: "POST" });
+    } catch {}
+  };
+
+  const handleReturn = async (ip: string) => {
+    try {
+      await fetch(`${API}/api/robots/remote/return/${ip}`, { method: "POST" });
+    } catch {}
+  };
+
+  const handleNextPoi = async (ip: string, poiId: number) => {
+    try {
+      await fetch(`${API}/api/robots/remote/next-point/${ip}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ poi_id: poiId }),
+      });
+    } catch {}
+  };
+
+  // 작업 중인 로봇 IP들
+  const busyIps = new Set(activeJobs.map((j) => j.ip));
+  // 작업 가능한 로봇 (현재 작업 중이 아닌)
+  const availableRobots = onlineRobots.filter((r) => !busyIps.has(r.IP));
 
   return (
     <div className="jack-test-panel">
@@ -157,10 +216,9 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
             className="jack-test-panel__select"
             value={robotIp}
             onChange={(e) => handleRobotChange(e.target.value)}
-            disabled={isRunning}
           >
             <option value="">선택</option>
-            {onlineRobots.map((r) => (
+            {availableRobots.map((r) => (
               <option key={r.IP} value={r.IP}>
                 {r.ROBOTNAME || r.SN} ({r.IP})
               </option>
@@ -168,18 +226,17 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
           </select>
         </label>
 
-
         <label className="jack-test-panel__label">
           작업 종류
           <select
             className="jack-test-panel__select"
             value={workMode}
             onChange={(e) => setWorkMode(e.target.value as typeof workMode)}
-            disabled={isRunning}
+            disabled={!robotIp}
           >
-            <option value="rack_pickup">랙 픽업 (W1 → 배달 → 복귀)</option>
-            <option value="delivery_no_rack">배달 (랙 없이)</option>
-            <option value="simple_move">단순 이동</option>
+            {allowedWorkModes.map((m) => (
+              <option key={m} value={m}>{WORK_MODE_LABELS[m]}</option>
+            ))}
           </select>
         </label>
 
@@ -189,7 +246,6 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
             className="jack-test-panel__select"
             value={pickupId}
             onChange={(e) => setPickupId(Number(e.target.value))}
-            disabled={isRunning}
           >
             <option value={0}>선택</option>
             {jackPois.map((p) => (
@@ -204,7 +260,6 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
             className="jack-test-panel__select"
             value={dropoffId}
             onChange={(e) => setDropoffId(Number(e.target.value))}
-            disabled={isRunning}
           >
             <option value={0}>선택</option>
             {jackPois.map((p) => (
@@ -213,98 +268,17 @@ export function JackTestPanel({ liveRobots, areaId }: Props) {
           </select>
         </label>
 
-        {pickupId > 0 && dropoffId > 0 && (
-          <div className="jack-test-panel__route-info">
-            {pickupName} <small>(픽업)</small> → {dropoffName} <small>(드롭오프)</small>
-          </div>
-        )}
-
         <div className="jack-test-panel__buttons">
-          {!isRunning ? (
-            <button
-              className="btn btn--primary jack-test-panel__btn"
-              onClick={handleStart}
-              disabled={!robotIp || !pickupId || !dropoffId || isStarting}
-            >
-              {isStarting ? "시작 중..." : "실행"}
-            </button>
-          ) : (
-            <button
-              className="btn btn--danger jack-test-panel__btn"
-              onClick={async () => {
-                try {
-                  if (robotIp) {
-                    await fetch(`${API}/api/robots/remote/stop-all/${robotIp}`, { method: "POST" });
-                  }
-                } catch {}
-                if (pollingRef.current) {
-                  clearInterval(pollingRef.current);
-                  pollingRef.current = null;
-                }
-                setCurrentJob(null);
-                setIsStarting(false);
-              }}
-            >
-              중지
-            </button>
-          )}
+          <button
+            className="btn btn--primary jack-test-panel__btn"
+            onClick={handleStart}
+            disabled={!robotIp || !pickupId || !dropoffId || isStarting}
+          >
+            {isStarting ? "시작 중..." : "실행"}
+          </button>
         </div>
       </div>
-
-      {currentJob && (
-        <div className="jack-test-panel__status" style={{ borderColor: statusColor }}>
-          <div className="jack-test-panel__status-label" style={{ color: statusColor }}>
-            {STATUS_LABELS[currentJob.status] || currentJob.status}
-          </div>
-          <div className="jack-test-panel__status-msg">{currentJob.message}</div>
-          {currentJob.status === "waiting_confirm" && robotIp && (
-            <button
-              className="btn btn--primary jack-test-panel__btn"
-              style={{ marginTop: 8 }}
-              onClick={async () => {
-                await fetch(`${API}/api/robots/remote/confirm/${robotIp}`, { method: "POST" });
-              }}
-            >출발</button>
-          )}
-          {currentJob.status === "waiting_next_or_return" && robotIp && (
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ fontSize: 13, color: "var(--text-muted)", textAlign: "center" }}>다음 작업 포인트를 선택하세요</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <select
-                  className="jack-test-panel__select"
-                  style={{ flex: 1 }}
-                  id="nextPoiSelect"
-                >
-                  {jackPois.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-                <button
-                  className="btn btn--primary"
-                  style={{ width: "auto", padding: "10px 20px", fontSize: 14 }}
-                  onClick={async () => {
-                    const sel = document.getElementById("nextPoiSelect") as HTMLSelectElement;
-                    if (sel?.value) {
-                      await fetch(`${API}/api/robots/remote/next-point/${robotIp}`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ poi_id: Number(sel.value) }),
-                      });
-                    }
-                  }}
-                >다음 이동</button>
-              </div>
-              <button
-                className="btn jack-test-panel__btn"
-                style={{ background: "linear-gradient(135deg, #36dfc8, #2bb5a0)", color: "white" }}
-                onClick={async () => {
-                  await fetch(`${API}/api/robots/remote/return/${robotIp}`, { method: "POST" });
-                }}
-              >복귀</button>
-            </div>
-          )}
-        </div>
-      )}
+      {/* 작업 중인 로봇 카드는 ActiveJobsPanel(공통 상단) 으로 분리됨 */}
     </div>
   );
 }

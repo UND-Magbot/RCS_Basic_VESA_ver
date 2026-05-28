@@ -124,7 +124,7 @@ def _update_robots_area(db: Session, area_id: str):
     db.commit()
 
 
-DOCKING_OFFSET = 0.0  # POI 좌표 = 도킹 위치 (오프셋 없음)
+DOCKING_OFFSET = 0.3  # POI(로봇 도킹 위치) 기준 충전기는 yaw 반대 방향(뒤쪽)으로 오프셋
 
 
 def _correct_map_grid_origin(db: Session, map_id: int) -> bool:
@@ -236,22 +236,26 @@ def _build_charging_overlay_features(charging_pois: list) -> list[dict]:
             yaw_deg = poi.angle * 180.0 / math.pi
         charger_yaw = str(int(round(yaw_deg)))  # 정수 문자열 ("180", "90" 등)
 
-        # 도킹 포인트: 충전소 yaw 방향으로 DOCKING_OFFSET만큼 앞
+        # POI = 로봇 도킹 중심, 충전기는 yaw 반대 방향(로봇 뒤쪽 = 벽쪽)으로 오프셋
         yaw_rad = math.radians(yaw_deg)
-        dock_x = poi.world_x + DOCKING_OFFSET * math.cos(yaw_rad)
-        dock_y = poi.world_y + DOCKING_OFFSET * math.sin(yaw_rad)
+        # 도킹 포인트 = POI 위치 그대로 (로봇 도킹 시 중심)
+        dock_x = poi.world_x
+        dock_y = poi.world_y
+        # 충전기 = POI 기준 yaw 반대 방향으로 DOCKING_OFFSET만큼 뒤
+        charger_x = poi.world_x - DOCKING_OFFSET * math.cos(yaw_rad)
+        charger_y = poi.world_y - DOCKING_OFFSET * math.sin(yaw_rad)
         raw_dock_yaw = int(round((yaw_deg + 180) % 360))
         dock_yaw = str(360 if raw_dock_yaw == 0 else raw_dock_yaw)  # 0° → "360" (1SSS 방식)
 
         poi_name = poi.name or ""
 
-        # 충전소 Feature (type "9")
+        # 충전소 Feature (type "9") — 실제 충전기 위치 (도킹 포인트보다 yaw 반대로 0.3m 뒤)
         features.append({
             "id": charger_id,
             "type": "Feature",
             "geometry": {
                 "type": "Point",
-                "coordinates": [poi.world_x, poi.world_y],
+                "coordinates": [charger_x, charger_y],
             },
             "properties": {
                 "deviceIds": None,
@@ -763,7 +767,82 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
 
 
 DEFAULT_AREA_ID = 21
-_current_area_id: int | None = None  # 층 전환 시 변경되는 현재 영역 ID
+
+# 운영자가 맵 관리에서 "메인 적용" 으로 지정한 default area_id.
+# 서버 재시작에도 유지되도록 JSON 파일에 영구 저장.
+import json as _json_mod
+from pathlib import Path as _Path
+
+_DEFAULT_AREA_FILE = _Path(__file__).resolve().parent.parent.parent / "default_area.json"
+
+
+def _load_persisted_default_area() -> int | None:
+    try:
+        if _DEFAULT_AREA_FILE.exists():
+            data = _json_mod.loads(_DEFAULT_AREA_FILE.read_text(encoding="utf-8"))
+            v = data.get("area_id")
+            return int(v) if v is not None else None
+    except Exception:
+        pass
+    return None
+
+
+def _save_persisted_default_area(area_id: int | None) -> None:
+    try:
+        _DEFAULT_AREA_FILE.write_text(
+            _json_mod.dumps({"area_id": area_id}), encoding="utf-8"
+        )
+    except Exception as e:
+        logger.warning(f"[default-area] 저장 실패: {e}")
+
+
+_current_area_id: int | None = _load_persisted_default_area()  # 서버 시작 시 파일 로드
+
+
+@router.post("/default-area/{area_id}")
+def api_set_default_area(area_id: int, db: Session = Depends(get_db)):
+    """운영자가 맵 관리 페이지에서 '메인 적용' 누르면 호출.
+    이 area_id 의 최신 맵이 모니터링의 default 가 된다 (POI/라인 포함)."""
+    # 검증: area 존재 + 그 area 에 활성 맵이 있는지
+    from app.models.map import Area, RobotMap as _RM
+    area = db.query(Area).filter(Area.area_id == area_id).first()
+    if not area:
+        raise HTTPException(status_code=404, detail="영역을 찾을 수 없습니다")
+    latest = (
+        db.query(_RM)
+        .filter(_RM.area_id == area_id, _RM.is_active == True)
+        .order_by(_RM.updated_at.desc())
+        .first()
+    )
+    if not latest:
+        raise HTTPException(status_code=400, detail="이 영역에 활성 맵이 없습니다")
+
+    global _current_area_id
+    _current_area_id = area_id
+    _save_persisted_default_area(area_id)
+    log_activity(
+        "map", "default_area_set",
+        f"메인 default 영역 적용: area_id={area_id}, 맵={latest.name}",
+        source="api_set_default_area",
+    )
+    return {"ok": True, "area_id": area_id, "map_id": latest.id, "map_name": latest.name}
+
+
+@router.get("/default-area")
+def api_get_default_area(db: Session = Depends(get_db)):
+    """현재 default 영역 + 그 영역의 사업장 ID 조회."""
+    from app.models.map import Area
+    business_id = None
+    if _current_area_id:
+        area = db.query(Area).filter(Area.area_id == _current_area_id).first()
+        if area:
+            business_id = area.business_id
+    return {
+        "area_id": _current_area_id,
+        "business_id": business_id,
+        "fallback": DEFAULT_AREA_ID,
+    }
+
 
 @router.get("/default-map")
 def api_get_default_map(db: Session = Depends(get_db)):
@@ -1024,41 +1103,21 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
                 f"carto_map: {len(mapping_data.get('carto_map', ''))}자, "
                 f"오버레이: {len(overlay_data.get('features', []))}개")
 
-    # ── 3) jack POI가 있으면 rack.specs 자동 설정 (큰 랙 + 작은 랙) ──
+    # ── 3) jack POI가 있으면 rack.specs 자동 설정 — 로봇 모델명 기준 ──
     if jack_pois:
         try:
-            _rack_specs = {
-                "rack.specs": [
-                    {
-                        "width": 0.83, "depth": 0.87,
-                        "margin": [0.1, 0.1, 0.1, 0.1],
-                        "alignment": "center",
-                        "alignment_margin_back": 0.02,
-                        "extra_leg_offset": 0.0,
-                        "leg_shape": "other",
-                        "leg_size": 0.05,
-                        "foot_radius": 0.025,
-                        "cargo_to_jack_front_edge_min_distance": 0.05,
-                    },
-                    {
-                        "width": 0.63, "depth": 0.67,
-                        "margin": [0.1, 0.1, 0.1, 0.1],
-                        "alignment": "center",
-                        "alignment_margin_back": 0.02,
-                        "extra_leg_offset": 0.0,
-                        "leg_shape": "other",
-                        "leg_size": 0.05,
-                        "foot_radius": 0.025,
-                        "cargo_to_jack_front_edge_min_distance": 0.05,
-                    },
-                ]
-            }
+            # 대상 로봇의 model 조회 → 모델명에서 사이즈(S300/S600) 자동 매칭 → spec 1개
+            from app.constants.rack_specs import build_rack_specs_for_robot_model, spec_name_for_robot_model
+            _target_robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
+            _model = _target_robot.model if _target_robot else None
+            _specs_list = build_rack_specs_for_robot_model(_model)
+            _rack_specs = {"rack.specs": _specs_list}
             http_requests.patch(
                 f"http://{robot_ip}:8090/system/settings/user",
                 headers={"Authorization": f"Secret {target_secret}"},
                 json=_rack_specs, timeout=5,
             )
-            logger.info(f"[sync] rack.specs 자동 설정 완료 → {robot_ip}")
+            logger.info(f"[sync] rack.specs 자동 설정 완료 → {robot_ip} (model={_model}, spec={spec_name_for_robot_model(_model)})")
         except Exception as e:
             logger.warning(f"[sync] rack.specs 설정 실패: {e}")
 
@@ -1456,27 +1515,15 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
     # jack POI가 있으면 rack.specs 자동 설정
     if jack_pois:
         try:
+            from app.constants.rack_specs import build_rack_specs_for_robot_model, spec_name_for_robot_model
+            _target_robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
+            _model = _target_robot.model if _target_robot else None
             http_requests.patch(
                 f"http://{robot_ip}:8090/system/settings/user",
                 headers={"Authorization": f"Secret {target_secret}"},
-                json={"rack.specs": [
-                    {
-                        "width": 0.83, "depth": 0.87,
-                        "margin": [0.1, 0.1, 0.1, 0.1], "alignment": "center",
-                        "alignment_margin_back": 0.02, "extra_leg_offset": 0.0,
-                        "leg_shape": "other", "leg_size": 0.05,
-                        "foot_radius": 0.025, "cargo_to_jack_front_edge_min_distance": 0.05,
-                    },
-                    {
-                        "width": 0.63, "depth": 0.67,
-                        "margin": [0.1, 0.1, 0.1, 0.1], "alignment": "center",
-                        "alignment_margin_back": 0.02, "extra_leg_offset": 0.0,
-                        "leg_shape": "other", "leg_size": 0.05,
-                        "foot_radius": 0.025, "cargo_to_jack_front_edge_min_distance": 0.05,
-                    },
-                ]}, timeout=5,
+                json={"rack.specs": build_rack_specs_for_robot_model(_model)}, timeout=5,
             )
-            logger.info(f"[sync-overlays] rack.specs 자동 설정 완료 → {robot_ip}")
+            logger.info(f"[sync-overlays] rack.specs 자동 설정 완료 → {robot_ip} (model={_model}, spec={spec_name_for_robot_model(_model)})")
         except Exception as e:
             logger.warning(f"[sync-overlays] rack.specs 설정 실패: {e}")
 
@@ -1571,7 +1618,9 @@ def api_get_robot_map_detail(robot_ip: str, robot_map_id: int):
 
 @router.put("/maps/{map_id}/elements")
 def api_save_map_elements(map_id: int, body: dict, db: Session = Depends(get_db)):
-    """맵의 POI·라인을 전체 교체 방식으로 저장"""
+    """맵의 POI·라인을 전체 교체 방식으로 저장.
+    저장 후 같은 area 의 경로 웨이포인트가 다른 맵 POI를 참조하고 있으면
+    POI 이름이 같은 것끼리 자동 재매핑한다."""
     try:
         result = save_map_elements(db, map_id, body)
         rm = db.query(RobotMap).filter(RobotMap.id == map_id).first()
@@ -1579,6 +1628,20 @@ def api_save_map_elements(map_id: int, body: dict, db: Session = Depends(get_db)
         log_activity("map", "elements_save",
                      f"맵 요소 저장 완료: {map_label}",
                      source="api_save_map_elements")
+        # 경로 웨이포인트 자동 재매핑 (실패는 치명적이지 않으니 swallow)
+        try:
+            from app.crud.map import remap_task_waypoints_to_map
+            remap_result = remap_task_waypoints_to_map(db, map_id)
+            if remap_result.get("updated"):
+                log_activity(
+                    "map", "routes_remapped",
+                    f"맵 '{map_label}' 저장에 따라 경로 웨이포인트 {remap_result['updated']}개 자동 재매핑",
+                    source="api_save_map_elements",
+                )
+            if remap_result.get("missing"):
+                logger.warning(f"[remap] 매칭 실패 POI: {remap_result['missing']}")
+        except Exception as e:
+            logger.warning(f"[remap] 자동 재매핑 실패: {e}")
         return result
     except HTTPException:
         raise
@@ -1673,15 +1736,13 @@ def api_set_current_map(robot_ip: str, body: dict):
 
 @router.post("/relocalize")
 def api_relocalize_robots(body: dict, db: Session = Depends(get_db)):
-    """선택된 로봇들의 위치를 충전소 또는 대기지점 좌표로 재조정.
+    """선택된 로봇들의 위치를 충전소 도킹 상태 기준으로 재조정.
 
-    body: {
-        robot_ips: list[str]   # 위치재조정할 로봇 IP 목록
-    }
+    body: { robot_ips: list[str] }
 
     우선순위:
-    1) standby_id → 대기지점 좌표 (정확한 위치)
-    2) charging_id → 충전소 도킹 포인트 (0.9m 오프셋)
+    1) charging_id → 충전소 좌표 + yaw 반대(로봇 정면이 충전기 밖을 향함)
+    2) standby_id → 랙 위치 좌표 (POI yaw 그대로)
     """
     from app.models.map import MapPOI
 
@@ -1704,20 +1765,12 @@ def api_relocalize_robots(body: dict, db: Session = Depends(get_db)):
                 results.append(result)
                 continue
 
-            # 대기지점 또는 충전소 POI 결정 (standby 우선)
+            # 위치재조정 — 충전기 도킹 상태 기준. charging_id 우선.
             poi = None
             poi_kind = ""
             use_docking_offset = False
 
-            if robot.standby_id:
-                poi = db.query(MapPOI).filter(
-                    MapPOI.id == robot.standby_id,
-                    MapPOI.is_active == True,
-                ).first()
-                poi_kind = "대기지점"
-                use_docking_offset = False
-
-            if not poi and robot.charging_id:
+            if robot.charging_id:
                 poi = db.query(MapPOI).filter(
                     MapPOI.id == robot.charging_id,
                     MapPOI.is_active == True,
@@ -1725,8 +1778,16 @@ def api_relocalize_robots(body: dict, db: Session = Depends(get_db)):
                 poi_kind = "충전소"
                 use_docking_offset = True
 
+            if not poi and robot.standby_id:
+                poi = db.query(MapPOI).filter(
+                    MapPOI.id == robot.standby_id,
+                    MapPOI.is_active == True,
+                ).first()
+                poi_kind = "랙 위치"
+                use_docking_offset = False
+
             if not poi:
-                result["message"] = "충전소 또는 대기지점이 지정되지 않았습니다."
+                result["message"] = "충전소 또는 랙 위치가 지정되지 않았습니다."
                 results.append(result)
                 continue
 
@@ -1924,14 +1985,20 @@ async def ws_map_relay(websocket: WebSocket, robot_ip: str, topics: Optional[str
 
 @router.get("/active-pois")
 def api_get_active_pois(area_id: int | None = None, db: Session = Depends(get_db)):
-    """활성 맵의 POI 목록 반환 (area_id 지정 시 해당 영역만)"""
+    """활성 맵의 POI 목록 반환 (area_id 지정 시 해당 영역의 모든 활성 맵 POI 통합).
+    standby-pois / charging-pois 와 동일한 정책 — 같은 area 라면 여러 맵에 분산된 POI 모두 포함.
+    """
     query = db.query(RobotMap).filter(RobotMap.is_active == True)
     if area_id:
         query = query.filter(RobotMap.area_id == area_id)
-    active_map = query.order_by(RobotMap.id.desc()).first()
-    if not active_map:
+    active_maps = query.order_by(RobotMap.id.desc()).all()
+    if not active_maps:
         return []
-    pois = db.query(MapPOI).filter(MapPOI.map_id == active_map.id, MapPOI.is_active == True).all()
+    map_ids = [m.id for m in active_maps]
+    pois = db.query(MapPOI).filter(
+        MapPOI.map_id.in_(map_ids),
+        MapPOI.is_active == True,
+    ).all()
     return [
         {
             "id": p.id,
@@ -1940,6 +2007,7 @@ def api_get_active_pois(area_id: int | None = None, db: Session = Depends(get_db
             "world_x": p.world_x,
             "world_y": p.world_y,
             "angle": p.angle,
+            "rack_size": p.rack_size,
         }
         for p in pois
     ]

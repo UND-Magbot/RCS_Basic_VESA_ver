@@ -96,6 +96,7 @@ class MapPOI(Base):
     address = Column(String(300), nullable=True)
     docking_radius = Column(Float, nullable=True)
     area_name = Column(String(200), nullable=True)                             # 소속 영역 이름
+    rack_size = Column(String(10), nullable=True)                              # 랙 위치(jack) 일 때: 'S600' / 'S300'
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

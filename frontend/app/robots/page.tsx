@@ -103,6 +103,7 @@ export default function RobotsPage() {
         platform: r.PLATFORM ?? null,
         busiName: null,
         buildingName: null,
+        robotType: (r.ROBOT_TYPE ?? "lifting") as "lifting" | "serving",
         currentTask: [],
       })),
     []

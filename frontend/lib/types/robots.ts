@@ -4,6 +4,8 @@ export type RunState = "EXECUTING" | "IDLE" | "CHARGING";
 
 export type OnlineStatus = "Online" | "Offline";
 
+export type RobotType = "lifting" | "serving";
+
 export type RobotDevice = {
   id: string;
   sn: string;
@@ -20,6 +22,7 @@ export type RobotDevice = {
   platform: string | null;
   busiName: string | null;
   buildingName: string | null;
+  robotType: RobotType;
   currentTask: DeviceTask[];
 };
 

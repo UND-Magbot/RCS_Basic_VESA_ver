@@ -17,9 +17,11 @@ function PoiMarker3DInner({ poi, imgW, imgH }: Props) {
   const isCharging = poi.type === "charging";
   const isJack = poi.type === "jack";
   const renderKind = poi.renderKind ?? (isCharging ? "circle" : "triangle");
+  const lockedBy = poi.lockedByRobot;
 
   return (
     <group position={[x, 0, z]}>
+      {lockedBy && <LockRing />}
       {isJack ? (
         /* 잭킹 포인트: 보라색 박스 (실제 랙 크기) */
         (() => {
@@ -94,8 +96,22 @@ function PoiMarker3DInner({ poi, imgW, imgH }: Props) {
         <Text fontSize={7} color="#ffffff" anchorY="bottom">
           {poi.label}
         </Text>
+        {lockedBy && (
+          <Text fontSize={5} color="#ff5b5b" anchorY="top" position={[0, -0.5, 0]}>
+            {`${lockedBy} 점유`}
+          </Text>
+        )}
       </Billboard>
     </group>
+  );
+}
+
+function LockRing() {
+  return (
+    <mesh position={[0, 0.6, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+      <ringGeometry args={[10, 12, 32]} />
+      <meshBasicMaterial color="#ff3b3b" transparent opacity={0.85} />
+    </mesh>
   );
 }
 

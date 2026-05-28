@@ -26,6 +26,8 @@ from app.schemas.task import (
 from app.services.scheduler import (
     add_task_job_by_id, remove_task_job, get_next_run_time, execute_scheduled_task,
 )
+from app.services import poi_lock
+from app.services.thread_utils import safe_thread
 
 logger = logging.getLogger(__name__)
 
@@ -188,17 +190,7 @@ def api_get_tasks(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ):
-    from datetime import date as date_cls
-    # 만료된 once 작업 자동 삭제 (cascade 방지)
-    expired_ids = [t.id for t in db.query(ScheduledTask.id).filter(
-        ScheduledTask.repeat_type == "once",
-        ScheduledTask.start_date < date_cls.today(),
-    ).all()]
-    if expired_ids:
-        db.query(TaskHistory).filter(TaskHistory.task_id.in_(expired_ids)).delete(synchronize_session=False)
-        db.query(ScheduledTask).filter(ScheduledTask.id.in_(expired_ids)).delete(synchronize_session=False)
-        db.commit()
-
+    # 만료된 once 작업 정리는 init_scheduler()에서 기동 시 1회만 수행
     query = db.query(ScheduledTask)
     if is_active is not None:
         query = query.filter(ScheduledTask.is_active == is_active)
@@ -297,8 +289,7 @@ def api_run_task_now(task_id: int, db: Session = Depends(get_db)):
     task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
     if not task:
         raise HTTPException(404, "작업을 찾을 수 없습니다")
-    t = threading.Thread(target=execute_scheduled_task, args=[task_id], daemon=True)
-    t.start()
+    safe_thread(target=execute_scheduled_task, args=(task_id,), name=f"task-run-{task_id}").start()
     return {"message": "작업 실행 시작", "task_id": task_id}
 
 
@@ -328,6 +319,14 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
     if not route:
         raise HTTPException(404, "경로를 찾을 수 없습니다")
 
+    # 로봇 타입별 작업 모드 검증
+    from app.constants.robot_types import is_work_mode_allowed, ROBOT_TYPE_LABELS
+    robot_type = getattr(robot, "robot_type", "lifting") or "lifting"
+    route_mode = getattr(route, "work_mode", "rack_pickup") or "rack_pickup"
+    if not is_work_mode_allowed(robot_type, route_mode):
+        label = ROBOT_TYPE_LABELS.get(robot_type, robot_type)
+        raise HTTPException(400, f"{label} 로봇은 이 경로의 작업 종류를 지원하지 않습니다")
+
     waypoints = db.query(TaskRouteWaypoint).filter(
         TaskRouteWaypoint.route_id == route.id
     ).order_by(TaskRouteWaypoint.order).all()
@@ -339,6 +338,7 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
         if not poi:
             continue
         wp_list.append({
+            "poi_id": poi.id,
             "name": poi.name, "x": poi.world_x, "y": poi.world_y,
             "ori": poi.angle or 0, "waypoint_type": wp.waypoint_type,
             "poi_type": poi.poi_type or "general", "wait_sec": wp.wait_sec or 0,
@@ -350,6 +350,17 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
 
     if len(wp_list) < 2:
         raise HTTPException(400, "경로에 웨이포인트가 부족합니다")
+
+    # POI 락 — 다른 로봇이 같은 POI를 점유 중이면 거부
+    lock_pids = [w.get("poi_id") for w in wp_list]
+    if getattr(robot, "charging_id", None):
+        lock_pids.append(robot.charging_id)
+    if getattr(robot, "standby_id", None):
+        lock_pids.append(robot.standby_id)
+    ok, conflict_pid = poi_lock.try_acquire(lock_pids, robot.id)
+    if not ok:
+        owner = poi_lock.get_owner(conflict_pid)
+        raise HTTPException(409, f"다른 로봇(id={owner})이 동일 POI를 사용 중입니다")
 
     # 이력 생성
     from datetime import datetime
@@ -368,27 +379,31 @@ def api_manual_run(data: ManualRunRequest, db: Session = Depends(get_db)):
     history_id = history.id
     robot_ip = robot.ip_address
 
+    robot_id_for_lock = robot.id
+
     def _run():
         from app.services.jack_service import run_route_job
         from app.services.scheduler import _return_to_charger
         from app.database import SessionLocal
-        result = run_route_job(robot_ip, wp_list, work_mode=getattr(route, "work_mode", "rack_pickup"))
-        db2 = SessionLocal()
         try:
-            h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
-            if h:
-                h.status = "succeeded" if result["status"] == "done" else "failed"
-                h.finished_at = datetime.now()
-                h.error_message = result.get("message") if result["status"] != "done" else None
-                db2.commit()
+            result = run_route_job(robot_ip, wp_list, work_mode=getattr(route, "work_mode", "rack_pickup"), robot_id=robot_id_for_lock)
+            db2 = SessionLocal()
+            try:
+                h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
+                if h:
+                    h.status = "succeeded" if result["status"] == "done" else "failed"
+                    h.finished_at = datetime.now()
+                    h.error_message = result.get("message") if result["status"] != "done" else None
+                    db2.commit()
+            finally:
+                db2.close()
+            # 성공 시에만 충전소 복귀
+            if result["status"] == "done":
+                _return_to_charger(robot_ip, wp_list)
         finally:
-            db2.close()
-        # 성공 시에만 충전소 복귀
-        if result["status"] == "done":
-            _return_to_charger(robot_ip, wp_list)
+            poi_lock.release_all_by_robot(robot_id_for_lock)
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    safe_thread(target=_run, name=f"manual-run-{robot_id_for_lock}").start()
 
     from app.crud.activity_log import log_activity
     log_activity("user", "manual_run", f"수동 배차: {route.name} → {robot.name}", source="api_manual_run")
@@ -414,6 +429,13 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
     if get_job_status(robot.ip_address):
         raise HTTPException(409, "로봇이 이미 작업 중입니다")
 
+    # 로봇 타입별 작업 모드 검증
+    from app.constants.robot_types import is_work_mode_allowed, ROBOT_TYPE_LABELS
+    robot_type = getattr(robot, "robot_type", "lifting") or "lifting"
+    if not is_work_mode_allowed(robot_type, data.work_mode or "rack_pickup"):
+        label = ROBOT_TYPE_LABELS.get(robot_type, robot_type)
+        raise HTTPException(400, f"{label} 로봇은 이 작업 종류를 지원하지 않습니다")
+
     pickup = db.query(MapPOI).filter(MapPOI.id == data.pickup_poi_id, MapPOI.is_active == True).first()
     dropoff = db.query(MapPOI).filter(MapPOI.id == data.dropoff_poi_id, MapPOI.is_active == True).first()
     if not pickup or not dropoff:
@@ -424,13 +446,24 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
         raise HTTPException(400, f"드롭오프 POI '{dropoff.name}'의 좌표가 없습니다")
 
     wp_list = [
-        {"name": pickup.name, "x": pickup.world_x, "y": pickup.world_y,
+        {"poi_id": pickup.id, "name": pickup.name, "x": pickup.world_x, "y": pickup.world_y,
          "ori": pickup.angle or 0, "waypoint_type": "pickup",
          "poi_type": pickup.poi_type or "general", "wait_sec": 0},
-        {"name": dropoff.name, "x": dropoff.world_x, "y": dropoff.world_y,
+        {"poi_id": dropoff.id, "name": dropoff.name, "x": dropoff.world_x, "y": dropoff.world_y,
          "ori": dropoff.angle or 0, "waypoint_type": "dropoff",
          "poi_type": dropoff.poi_type or "general", "wait_sec": 0},
     ]
+
+    # POI 락
+    lock_pids = [pickup.id, dropoff.id]
+    if getattr(robot, "charging_id", None):
+        lock_pids.append(robot.charging_id)
+    if getattr(robot, "standby_id", None):
+        lock_pids.append(robot.standby_id)
+    ok, conflict_pid = poi_lock.try_acquire(lock_pids, robot.id)
+    if not ok:
+        owner = poi_lock.get_owner(conflict_pid)
+        raise HTTPException(409, f"다른 로봇(id={owner})이 동일 POI를 사용 중입니다")
 
     from datetime import datetime
     history = TaskHistory(
@@ -447,6 +480,7 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
     db.refresh(history)
     history_id = history.id
     robot_ip = robot.ip_address
+    robot_id_for_lock = robot.id
 
     use_confirm = data.manual_confirm
 
@@ -454,35 +488,304 @@ def api_manual_run_pois(data: ManualRunPoisRequest, db: Session = Depends(get_db
         from app.services.jack_service import run_route_job
         from app.services.scheduler import _return_to_charger
         from app.database import SessionLocal
-        # 영역 ID 확인 (POI → 맵 → 영역)
-        from app.models.map import RobotMap as _RM
-        _db3 = SessionLocal()
         try:
-            _map = _db3.query(_RM).join(MapPOI, MapPOI.map_id == _RM.id).filter(MapPOI.id == data.pickup_poi_id).first()
-            _area_id = _map.area_id if _map else None
+            # 영역 ID 확인 (POI → 맵 → 영역)
+            from app.models.map import RobotMap as _RM
+            _db3 = SessionLocal()
+            try:
+                _map = _db3.query(_RM).join(MapPOI, MapPOI.map_id == _RM.id).filter(MapPOI.id == data.pickup_poi_id).first()
+                _area_id = _map.area_id if _map else None
+            finally:
+                _db3.close()
+            result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm, area_id=_area_id, work_mode=data.work_mode or "rack_pickup", robot_id=robot_id_for_lock)
+            db2 = SessionLocal()
+            try:
+                h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
+                if h:
+                    h.status = "succeeded" if result["status"] == "done" else "failed"
+                    h.finished_at = datetime.now()
+                    h.error_message = result.get("message") if result["status"] != "done" else None
+                    db2.commit()
+            finally:
+                db2.close()
+            # 성공 시에만 충전소 복귀
+            if result["status"] == "done":
+                _return_to_charger(robot_ip, wp_list)
         finally:
-            _db3.close()
-        result = run_route_job(robot_ip, wp_list, manual_confirm=use_confirm, area_id=_area_id, work_mode=data.work_mode or "rack_pickup")
-        db2 = SessionLocal()
-        try:
-            h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
-            if h:
-                h.status = "succeeded" if result["status"] == "done" else "failed"
-                h.finished_at = datetime.now()
-                h.error_message = result.get("message") if result["status"] != "done" else None
-                db2.commit()
-        finally:
-            db2.close()
-        # 성공 시에만 충전소 복귀
-        if result["status"] == "done":
-            _return_to_charger(robot_ip, wp_list)
+            poi_lock.release_all_by_robot(robot_id_for_lock)
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    safe_thread(target=_run, name=f"manual-run-pois-{robot_id_for_lock}").start()
 
     from app.crud.activity_log import log_activity
     log_activity("user", "manual_run", f"수동 배차: {pickup.name}→{dropoff.name} ({robot.name})", source="api_manual_run_pois")
     return {"message": "수동 실행 시작", "history_id": history_id}
+
+
+# ══════════════════════════════════════
+# 배치 수동 배차 (여러 로봇 동시 + 반복)
+# ══════════════════════════════════════
+
+class BatchAssignment(_BaseModel):
+    robot_id: int
+    work_mode: str = "rack_pickup"   # rack_pickup / delivery_no_rack / simple_move
+    pickup_poi_id: int
+    dropoff_poi_id: int
+    wait_sec: int = 0                # 각 위치 도착 후 다음 위치 가기 전 대기 (초)
+    repeat_count: int | None = None  # None or 0 = 무한 반복
+
+
+class ManualRunBatchRequest(_BaseModel):
+    assignments: list[BatchAssignment]
+
+
+@router.post("/manual-run-batch")
+def api_manual_run_batch(data: ManualRunBatchRequest, db: Session = Depends(get_db)):
+    """여러 로봇 동시 수동 배차 + 반복.
+
+    - 로봇별 (work_mode, 픽업, 드롭오프, 위치 간 대기, 반복 횟수) 명세
+    - 한 어사인먼트의 실패/skip 은 다른 어사인먼트에 영향 X
+    - repeat_count=None or 0 → 무한 반복 (stop_robot_job 으로 중지 가능)
+    - 응답: { started: [...], skipped: [...] }
+    """
+    from datetime import datetime as _dt
+    from app.services.jack_service import get_job_status, run_route_job, _interruptible_sleep
+    from app.services.scheduler import _return_to_charger
+    from app.database import SessionLocal as _SL
+    from app.constants.robot_types import is_work_mode_allowed, ROBOT_TYPE_LABELS
+
+    if not data.assignments:
+        raise HTTPException(400, "어사인먼트가 비어있습니다")
+
+    started: list[dict] = []
+    skipped: list[dict] = []
+
+    for a in data.assignments:
+        # 1) 로봇 검증
+        robot = db.query(Robot).filter(Robot.id == a.robot_id).first()
+        if not robot or not robot.ip_address:
+            skipped.append({"robot_id": a.robot_id, "reason": "로봇을 찾을 수 없습니다"})
+            continue
+        if get_job_status(robot.ip_address):
+            skipped.append({"robot_id": a.robot_id, "reason": "로봇이 이미 작업 중입니다"})
+            continue
+
+        # 2) 작업 모드 검증
+        work_mode = (a.work_mode or "rack_pickup").strip()
+        robot_type = getattr(robot, "robot_type", "lifting") or "lifting"
+        if not is_work_mode_allowed(robot_type, work_mode):
+            label = ROBOT_TYPE_LABELS.get(robot_type, robot_type)
+            skipped.append({"robot_id": a.robot_id,
+                            "reason": f"{label} 로봇은 '{work_mode}' 작업을 지원하지 않습니다"})
+            continue
+
+        # 3) POI 검증
+        pickup = db.query(MapPOI).filter(MapPOI.id == a.pickup_poi_id, MapPOI.is_active == True).first()
+        dropoff = db.query(MapPOI).filter(MapPOI.id == a.dropoff_poi_id, MapPOI.is_active == True).first()
+        if not pickup or not dropoff:
+            skipped.append({"robot_id": a.robot_id, "reason": "POI를 찾을 수 없습니다"})
+            continue
+        if pickup.world_x is None or dropoff.world_x is None:
+            skipped.append({"robot_id": a.robot_id, "reason": "POI 좌표가 없습니다"})
+            continue
+
+        # 4) wp_list 구성 — 각 위치 도착 후 다음으로 가기 전 wait_sec 대기
+        wait_sec = max(0, int(a.wait_sec or 0))
+        wp_list = [
+            {"poi_id": pickup.id, "name": pickup.name, "x": pickup.world_x, "y": pickup.world_y,
+             "ori": pickup.angle or 0, "waypoint_type": "pickup",
+             "poi_type": pickup.poi_type or "general", "wait_sec": wait_sec},
+            {"poi_id": dropoff.id, "name": dropoff.name, "x": dropoff.world_x, "y": dropoff.world_y,
+             "ori": dropoff.angle or 0, "waypoint_type": "dropoff",
+             "poi_type": dropoff.poi_type or "general", "wait_sec": wait_sec},
+        ]
+
+        # 5) POI 락
+        lock_pids: list[int] = [pickup.id, dropoff.id]
+        if getattr(robot, "charging_id", None):
+            lock_pids.append(robot.charging_id)
+        if getattr(robot, "standby_id", None):
+            lock_pids.append(robot.standby_id)
+        ok, conflict_pid = poi_lock.try_acquire(lock_pids, robot.id)
+        if not ok:
+            owner = poi_lock.get_owner(conflict_pid)
+            skipped.append({"robot_id": a.robot_id,
+                            "reason": f"다른 로봇(id={owner})이 동일 POI(id={conflict_pid}) 사용 중"})
+            continue
+
+        # 6) 이력 row
+        rc = a.repeat_count if (a.repeat_count is not None and a.repeat_count > 0) else None
+        repeat_label = f"x{rc}" if rc is not None else "∞"
+        history = TaskHistory(
+            task_name=f"배치({repeat_label}): {pickup.name}→{dropoff.name}",
+            route_name=f"{pickup.name}→{dropoff.name}",
+            robot_id=robot.id,
+            robot_name=robot.name,
+            pickup_poi_name=pickup.name,
+            dropoff_poi_name=dropoff.name,
+            status="running",
+        )
+        db.add(history)
+        db.commit()
+        db.refresh(history)
+        history_id = history.id
+        robot_ip = robot.ip_address
+        robot_id_for_lock = robot.id
+
+        # 7) 백그라운드 실행 (반복 루프)
+        def _run(history_id=history_id, robot_ip=robot_ip, wp_list=wp_list,
+                 work_mode=work_mode, robot_id_for_lock=robot_id_for_lock,
+                 repeat_max=rc, wait_between=wait_sec):
+            try:
+                iteration = 0
+                final_status = "succeeded"
+                final_msg: str | None = None
+                while True:
+                    iteration += 1
+                    # 첫 회만 standby 에서 랙 픽업. 마지막 회만 standby 로 랙 복귀.
+                    # 중간/무한 반복 회차는 잭업 상태로 사이클을 계속 이어감 (start_jacked / end_jacked).
+                    is_first = iteration == 1
+                    is_last_iteration = (repeat_max is not None) and (iteration >= repeat_max)
+                    result = run_route_job(
+                        robot_ip, wp_list,
+                        work_mode=work_mode,
+                        skip_standby_pickup=(not is_first),
+                        skip_standby_return=(not is_last_iteration),
+                        start_jacked=(not is_first),
+                        end_jacked=(not is_last_iteration),
+                        robot_id=robot_id_for_lock,
+                    )
+                    if result["status"] != "done":
+                        final_status = "failed"
+                        final_msg = result.get("message")
+                        break
+                    # 종료 조건
+                    if is_last_iteration:
+                        break
+                    if wait_between > 0:
+                        _interruptible_sleep(robot_ip, wait_between)
+
+                # 이력 마무리
+                db2 = _SL()
+                try:
+                    h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
+                    if h:
+                        h.status = final_status
+                        h.finished_at = _dt.now()
+                        h.error_message = final_msg
+                        db2.commit()
+                finally:
+                    db2.close()
+                # 충전소 복귀 (성공 시에만)
+                if final_status == "succeeded":
+                    _return_to_charger(robot_ip, wp_list)
+            except RuntimeError:
+                # 사용자 중지
+                db2 = _SL()
+                try:
+                    h = db2.query(TaskHistory).filter(TaskHistory.id == history_id).first()
+                    if h:
+                        h.status = "cancelled"
+                        h.finished_at = _dt.now()
+                        db2.commit()
+                finally:
+                    db2.close()
+            finally:
+                poi_lock.release_all_by_robot(robot_id_for_lock)
+
+        safe_thread(target=_run, name=f"batch-{robot.id}").start()
+        started.append({"robot_id": a.robot_id, "history_id": history_id,
+                        "repeat": repeat_label})
+
+    # 활동 로그
+    from app.crud.activity_log import log_activity
+    log_activity(
+        "user", "manual_run_batch",
+        f"배치 수동 배차: 시작 {len(started)}대 / skip {len(skipped)}대",
+        source="api_manual_run_batch",
+    )
+    return {"started": started, "skipped": skipped}
+
+
+# ══════════════════════════════════════
+# POI 락 상태 (디버깅/운영)
+# ══════════════════════════════════════
+
+@router.get("/poi-locks")
+def api_get_poi_locks(db: Session = Depends(get_db)):
+    """현재 잡혀있는 POI 락 스냅샷 (poi_id → robot_id)"""
+    snap = poi_lock.snapshot()
+    if not snap:
+        return {"locks": []}
+    poi_ids = list(snap.keys())
+    robot_ids = list(set(snap.values()))
+    pois = {p.id: p.name for p in db.query(MapPOI).filter(MapPOI.id.in_(poi_ids)).all()}
+    robots = {r.id: r.name for r in db.query(Robot).filter(Robot.id.in_(robot_ids)).all()}
+    return {
+        "locks": [
+            {
+                "poi_id": pid,
+                "poi_name": pois.get(pid),
+                "robot_id": rid,
+                "robot_name": robots.get(rid),
+            }
+            for pid, rid in snap.items()
+        ]
+    }
+
+
+@router.delete("/poi-locks/robot/{robot_id}")
+def api_release_poi_locks(robot_id: int):
+    """특정 로봇이 잡고 있는 모든 POI 락 강제 해제 (작업이 비정상 종료된 경우용)"""
+    poi_lock.release_all_by_robot(robot_id)
+    return {"message": f"robot {robot_id} 의 POI 락을 모두 해제했습니다"}
+
+
+@router.get("/deadlock-monitor")
+def api_get_deadlock_snapshot():
+    """데드락 모니터가 누적 중인 로봇별 샘플 윈도우 (디버깅용)"""
+    from app.services import deadlock_monitor
+    return {"window": deadlock_monitor.snapshot()}
+
+
+@router.post("/routes/remap-to-map/{map_id}")
+def api_remap_routes(map_id: int, db: Session = Depends(get_db)):
+    """같은 area 의 다른 맵 POI를 참조 중인 경로 웨이포인트를 새 맵으로 자동 재매핑.
+    POI 이름이 같은 것끼리 매칭. 새 맵에 없는 이름은 missing 으로 반환."""
+    from app.crud.map import remap_task_waypoints_to_map
+    return remap_task_waypoints_to_map(db, map_id)
+
+
+@router.get("/zone-locks")
+def api_get_zone_locks(db: Session = Depends(get_db)):
+    """현재 점유 중인 zone (좁은 통로) 락 스냅샷 (zone_id → robot)"""
+    from app.services import zone_lock
+    from app.models.map import MapPolygon
+    snap = zone_lock.snapshot()
+    if not snap:
+        return {"locks": []}
+    zone_ids = list(snap.keys())
+    robot_ids = list(set(snap.values()))
+    zones = {z.id: z.name for z in db.query(MapPolygon).filter(MapPolygon.id.in_(zone_ids)).all()}
+    robots = {r.id: r.name for r in db.query(Robot).filter(Robot.id.in_(robot_ids)).all()}
+    return {
+        "locks": [
+            {
+                "zone_id": zid,
+                "zone_name": zones.get(zid),
+                "robot_id": rid,
+                "robot_name": robots.get(rid),
+            }
+            for zid, rid in snap.items()
+        ]
+    }
+
+
+@router.delete("/zone-locks/robot/{robot_id}")
+def api_release_zone_locks(robot_id: int):
+    """특정 로봇의 zone 락 강제 해제 (비정상 종료 복구용)"""
+    from app.services import zone_lock
+    zone_lock.release_all_by_robot(robot_id)
+    return {"message": f"robot {robot_id} 의 zone 락 해제 완료"}
 
 
 # ══════════════════════════════════════

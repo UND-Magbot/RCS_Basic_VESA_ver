@@ -29,6 +29,7 @@ class RobotUpdate(BaseModel):
     site: Optional[str] = Field(None, max_length=100)
     model: Optional[str] = Field(None, max_length=100)
     ip_address: Optional[str] = Field(None, max_length=45)
+    robot_type: Optional[str] = Field(None, max_length=30)
 
 
 class MinBatteryUpdate(BaseModel):
@@ -75,6 +76,7 @@ class RobotResponse(BaseModel):
     ip_address: Optional[str]
     max_battery: int
     min_battery: int
+    robot_type: Optional[str] = "lifting"
     is_active: bool
     business_id: Optional[str] = None
     area_id: Optional[str] = None

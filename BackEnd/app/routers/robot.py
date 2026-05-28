@@ -97,14 +97,26 @@ def api_get_robot_quick_status(robot_ip: str):
     return result
 
 
+# ── /live 응답 5초 TTL 캐시 ──
+import time as _time_mod
+import threading as _threading_mod
+_live_cache: dict = {"data": None, "ts": 0.0}
+_live_cache_lock = _threading_mod.Lock()
+_LIVE_CACHE_TTL = 5.0
+
+
 @router.get("/live")
 def api_get_robots_live(db: Session = Depends(get_db)):
     """DB 로봇 목록을 기반으로 실시간 API 정보를 병합하여 반환.
-
-    1차: DB robots 테이블에서 is_active인 로봇 목록
-    2차: 실시간 API로 RUNSTATE, ONLINE, SIGNAL, POWER 등 오버레이
-    3차: DB에 없지만 API에서 새로 발견된 로봇도 추가
+    5초 TTL 캐시 적용 — 여러 클라이언트가 동시에 폴링해도 로봇에 중복 호출 안 함.
     """
+    # 캐시 체크
+    with _live_cache_lock:
+        cached = _live_cache["data"]
+        age = _time_mod.time() - _live_cache["ts"]
+        if cached is not None and age < _LIVE_CACHE_TTL:
+            return cached
+
     # ── 1차: DB 로봇 목록 가져오기 ──
     db_robots = db.query(Robot).filter(Robot.is_active == True).all()
 
@@ -128,6 +140,7 @@ def api_get_robots_live(db: Session = Depends(get_db)):
             "ONLINE": "Offline",
             "SIGNAL": "N/A",
             "POWER(%)": "-",
+            "ROBOT_TYPE": getattr(r, "robot_type", "lifting") or "lifting",
         }
         items.append(item)
         sn_to_item[r.serial_number] = item
@@ -185,7 +198,12 @@ def api_get_robots_live(db: Session = Depends(get_db)):
                 sn_to_item[live_sn] = new_item
 
     items.sort(key=lambda x: str(x.get("IP", "")))
-    return {"total": len(items), "items": items}
+    result = {"total": len(items), "items": items}
+    # 캐시 업데이트
+    with _live_cache_lock:
+        _live_cache["data"] = result
+        _live_cache["ts"] = _time_mod.time()
+    return result
 
 
 @router.post("/sync-live")
@@ -738,6 +756,42 @@ def api_stop_all(robot_ip: str):
     return {"ok": True, "message": "모든 작업이 정지되었습니다"}
 
 
+@router.post("/remote/pause/{robot_ip}")
+def api_pause_robot(robot_ip: str):
+    """일시정지 — 현재 이동 즉시 cancel + paused 플래그 set.
+    재개될 때까지 작업 thread 가 대기."""
+    from app.services.jack_service import pause_robot_job
+    pause_robot_job(robot_ip)
+    return {"ok": True, "message": "일시정지"}
+
+
+@router.post("/remote/resume/{robot_ip}")
+def api_resume_robot(robot_ip: str):
+    """일시정지 해제 — cancel 된 이동은 safe_move 가 자동 재시도."""
+    from app.services.jack_service import resume_robot_job
+    resume_robot_job(robot_ip)
+    return {"ok": True, "message": "재개"}
+
+
+@router.post("/remote/force-return/{robot_ip}")
+def api_force_return(robot_ip: str, db: Session = Depends(get_db)):
+    """강제 종료 — 현재 위치에서 잭 업 → 랙 위치 복귀 → 충전소 도킹.
+    별도 thread 로 전체 절차를 수행하며 즉시 응답."""
+    from app.services.jack_service import force_return_and_dock
+    from app.services.thread_utils import safe_thread
+
+    robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
+    robot_id = robot.id if robot else None
+    safe_thread(
+        target=force_return_and_dock,
+        args=(robot_ip, robot_id),
+        name=f"force-return-{robot_ip}",
+    ).start()
+    from app.crud.activity_log import log_activity
+    log_activity("user", "force_return_request", f"강제 종료 요청: {robot_ip}", source="api_force_return")
+    return {"ok": True, "message": "강제 종료 시작 — 랙 보관 후 충전소 복귀합니다"}
+
+
 @router.post("/remote/relocalize/{robot_ip}")
 def api_relocalize(robot_ip: str):
     """위치 복구 — start_global_positioning + 실패 시 시스템 재시작 옵션"""
@@ -790,7 +844,7 @@ def api_return_to_standby(robot_ip: str):
 
 @router.post("/remote/return-to-standby/{robot_ip}")
 def api_return_to_standby_now(robot_ip: str):
-    """대기장소(W1) 즉시 복귀 — 현재 위치에서 align → jack_up → W1 이동 → jack_down"""
+    """랙 위치 즉시 복귀 — 현재 위치에서 jack_up → 랙 위치 이동 → jack_down"""
     import threading
     from app.services.jack_service import (
         _get_standby_poi, align_with_retry, jack_up, jack_down,
@@ -800,11 +854,11 @@ def api_return_to_standby_now(robot_ip: str):
 
     standby = _get_standby_poi(robot_ip=robot_ip)
     if not standby:
-        raise HTTPException(400, "대기장소(W1) POI가 없습니다")
+        raise HTTPException(400, "랙 위치 POI가 없습니다")
 
     def _run():
         try:
-            update_job_status(robot_ip, status="returning", message="대기장소 복귀 중...")
+            update_job_status(robot_ip, status="returning", message="랙 위치 복귀 중...")
             # 1) 잭 업 (이미 올려져 있을 수 있으나 안전하게)
             try:
                 jack_up(robot_ip)
@@ -850,23 +904,43 @@ def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
     if not charger or charger.world_x is None or charger.world_y is None:
         raise HTTPException(status_code=404, detail="충전소 POI를 찾을 수 없습니다")
     try:
-        # DB 충전소 좌표 직접 사용 (target_ori는 라디안)
         cx = charger.world_x
         cy = charger.world_y
         cyaw = charger.angle if charger.angle is not None else 0
-        r = req.post(
+        # 1) standard로 지정 충전소 근처 이동 (여러 충전소 중 원하는 것 선택하기 위해)
+        req.post(
             f"http://{robot_ip}:8090/chassis/moves",
             json={
                 "creator": "rcs",
-                "type": "charge",
+                "type": "standard",
                 "target_x": cx,
                 "target_y": cy,
                 "target_ori": cyaw,
-                "charge_retry_count": 3,
             },
             timeout=5,
         )
-        return {"status": r.status_code, "charger": charger.name}
+        # 2) charge 명령 — target_ori 명시 (로봇 정렬 후 정확한 충전기 인식)
+        import threading
+        def _then_charge():
+            import time as _t
+            _t.sleep(8)  # standard 이동 완료 대기
+            try:
+                req.post(
+                    f"http://{robot_ip}:8090/chassis/moves",
+                    json={
+                        "creator": "rcs",
+                        "type": "charge",
+                        "target_x": cx,
+                        "target_y": cy,
+                        "target_ori": cyaw,
+                        "charge_retry_count": 3,
+                    },
+                    timeout=5,
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_then_charge, daemon=True).start()
+        return {"ok": True, "charger": charger.name}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

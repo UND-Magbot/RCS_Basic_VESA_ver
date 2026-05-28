@@ -2,6 +2,8 @@ export type MapTool = "select" | "point" | "jackPoint" | "line" | "curveLine" | 
 
 export type POIType = "waypoint" | "standby" | "charging" | "firewall" | "jack";
 
+export type RackSize = "S600" | "S300";
+
 export type LoadType = "normal" | "heavy";
 
 export type LineDirection = "forward" | "backward" | "bidirectional";
@@ -18,6 +20,7 @@ export type POI = {
   robotSns?: string[];
   address?: string;
   dockingRadius?: number;
+  rackSize?: RackSize;
 };
 
 export type PathLine = {
@@ -80,10 +83,14 @@ export type MapToolbarTopProps = {
   onUndo: () => void;
   onFullscreen: () => void;
   isFullscreen: boolean;
+  /** 활성 도구 모드 (포인트/작업 포인트/가상벽/삭제 등) */
+  activeTool: MapTool;
+  /** 모드 전환 핸들러 */
+  onToolChange: (tool: MapTool) => void;
+  /** 즉시 실행 — 로봇 현재 위치에 충전소 POI 자동 생성 */
   onChargingPile: () => void;
+  /** 즉시 실행 — 로봇 현재 위치에 일반 POI 자동 생성 */
   onCurrentPos: () => void;
-  onCurrentPosJack: () => void;
-  onFirewall: () => void;
 };
 
 export type MapToolbarLeftProps = {
@@ -109,6 +116,8 @@ export type POIEditPopupProps = {
   onUpdate: (id: string, data: Partial<POI>) => void;
   onDelete: (id: string) => void;
   onClose: () => void;
+  /** 유형이 바뀌면 자동으로 그 유형의 다음 이름(C1/J2/R3/W4) 으로 변경. */
+  getNextNameForType?: (type: POIType) => string;
 };
 
 export type LineDirectionPopupProps = {

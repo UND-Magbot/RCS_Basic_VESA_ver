@@ -12,6 +12,7 @@ interface JobInfo {
   total_steps: number;
   started_at: number;
   robot_ip?: string;
+  work_mode?: string;
 }
 
 interface ScheduleItem {
@@ -135,13 +136,17 @@ export function JobStatusPanel() {
 
   const [notification, setNotification] = useState<string | null>(null);
 
-  const handleStopAndDock = async (ip: string) => {
+  const handleForceReturn = async (ip: string, workMode?: string) => {
+    const msg = workMode === "rack_pickup"
+      ? "강제 종료하시겠습니까?\n랙을 원래 위치(랙 보관 지점)에 두고 충전소로 복귀합니다."
+      : "강제 종료하시겠습니까?\n현재 작업을 중단하고 곧바로 충전소로 복귀합니다.";
+    if (!confirm(msg)) return;
     try {
-      await fetch(`${API}/api/robots/remote/stop-all/${ip}`, { method: "POST" });
-      setNotification("작업이 정지되었습니다");
+      await fetch(`${API}/api/robots/remote/force-return/${ip}`, { method: "POST" });
+      setNotification("강제 종료 — 충전소로 복귀합니다");
       setTimeout(() => setNotification(null), 3000);
     } catch {
-      setNotification("정지 명령 실패");
+      setNotification("강제 종료 명령 실패");
       setTimeout(() => setNotification(null), 3000);
     }
   };
@@ -246,8 +251,8 @@ export function JobStatusPanel() {
                   {ip && <span className="job-card__robot-ip">로봇: {ip}</span>}
                   <button
                     className="job-card__stop-btn"
-                    onClick={() => handleStopAndDock(ip)}
-                  >정지</button>
+                    onClick={() => handleForceReturn(ip, job.work_mode)}
+                  >강제 종료</button>
                 </div>
               </div>
             );

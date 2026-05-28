@@ -40,6 +40,7 @@ def _to_response(robot: Robot) -> RobotResponse:
         ip_address=robot.ip_address,
         max_battery=robot.max_battery,
         min_battery=robot.min_battery,
+        robot_type=getattr(robot, "robot_type", "lifting") or "lifting",
         is_active=robot.is_active,
         business_id=robot.business_id,
         area_id=robot.area_id,
@@ -125,6 +126,8 @@ def update_robot(db: Session, robot_id: int, data: RobotUpdate) -> RobotResponse
         robot.model = data.model
     if data.ip_address is not None:
         robot.ip_address = data.ip_address
+    if data.robot_type is not None:
+        robot.robot_type = data.robot_type
 
     db.commit()
     db.refresh(robot)

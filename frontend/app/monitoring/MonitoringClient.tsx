@@ -42,10 +42,60 @@ const MonitoringMap3D = dynamic(
 import type { PoiMarkerData, RobotMarkerData, RouteSegment, WaypointMarkerData } from "@/lib/types/map-markers";
 import { BusinessSelectBox } from "../components/ui/monitoring/BusinessSelectBox";
 import { JackTestPanel } from "../components/ui/monitoring/JackTestPanel";
+import { BatchDispatchPanel } from "../components/ui/monitoring/BatchDispatchPanel";
+import { ActiveJobsPanel } from "../components/ui/monitoring/ActiveJobsPanel";
 import "../components/ui/monitoring/JackTestPanel.css";
 import { apiFetch } from "@/lib/api";
+import { getPoiLocks, getZoneLocks } from "@/lib/api/tasks";
+import type { ZoneLockEntry } from "@/lib/api/tasks";
+import {
+  getStoredBusiness, getStoredArea, setStoredBusiness, setStoredArea,
+} from "@/lib/util/selectedScope";
 import type { Business } from "@/lib/types/robots";
 import type { MapMeta } from "@/lib/types/map";
+
+function DispatchTabs({ liveRobots, areaId }: { liveRobots: any[]; areaId?: number }) {
+  const [mode, setMode] = useState<"single" | "batch">("single");
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      {/* 작업 중 로봇 카드는 단일/배치 모드 무관 공통 표시 */}
+      <ActiveJobsPanel liveRobots={liveRobots} areaId={areaId} />
+      <div style={{ display: "flex", gap: 4, padding: "8px 12px 0", borderBottom: "1px solid var(--border-color)" }}>
+        <button
+          onClick={() => setMode("single")}
+          style={{
+            background: "transparent",
+            border: "none",
+            padding: "6px 12px",
+            cursor: "pointer",
+            fontSize: 12,
+            borderBottom: mode === "single" ? "2px solid var(--color-primary, #36dfc8)" : "2px solid transparent",
+            color: mode === "single" ? "var(--color-primary, #36dfc8)" : "var(--text-muted)",
+            fontWeight: mode === "single" ? 600 : 400,
+          }}
+        >단일</button>
+        <button
+          onClick={() => setMode("batch")}
+          style={{
+            background: "transparent",
+            border: "none",
+            padding: "6px 12px",
+            cursor: "pointer",
+            fontSize: 12,
+            borderBottom: mode === "batch" ? "2px solid var(--color-primary, #36dfc8)" : "2px solid transparent",
+            color: mode === "batch" ? "var(--color-primary, #36dfc8)" : "var(--text-muted)",
+            fontWeight: mode === "batch" ? 600 : 400,
+          }}
+        >배치 (여러 대)</button>
+      </div>
+      <div style={{ flex: 1, overflow: "auto" }}>
+        {mode === "single"
+          ? <JackTestPanel liveRobots={liveRobots} areaId={areaId} />
+          : <BatchDispatchPanel liveRobots={liveRobots} areaId={areaId} />}
+      </div>
+    </div>
+  );
+}
 
 type BusinessItem = {
   business_id: number;
@@ -117,6 +167,7 @@ type ApiRobotFull = {
   status: ApiRobotStatus | null;
   created_at: string;
   updated_at: string;
+  robot_type?: string | null;
 };
 
 type LiveRobot = {
@@ -206,6 +257,10 @@ export function MonitoringClient({ initialDateTime }: Props) {
   const [apiWaypoints, setApiWaypoints] = useState<WaypointMarkerData[]>([]);
   const [apiRouteWaypoints, setApiRouteWaypoints] = useState<WaypointMarkerData[]>([]);
   const [apiRouteSegments, setApiRouteSegments] = useState<RouteSegment[]>([]);
+  // POI 락 (poi_id → robot_name). 5초 폴링.
+  const [poiLockMap, setPoiLockMap] = useState<Map<string, string>>(new Map());
+  // Zone(통로) 락 (다중 로봇 통로 진입 직렬화)
+  const [zoneLocks, setZoneLocks] = useState<ZoneLockEntry[]>([]);
 
 
   // 로봇 실시간 위치 (다중 로봇)
@@ -222,6 +277,10 @@ export function MonitoringClient({ initialDateTime }: Props) {
   useEffect(() => {
     if (robotsLoaded && liveLoaded) setIsLoading(false);
   }, [robotsLoaded, liveLoaded]);
+
+  // 마지막 선택 사업장·영역을 다른 페이지와 공유 (localStorage)
+  useEffect(() => { setStoredBusiness(selectedBusiness); }, [selectedBusiness]);
+  useEffect(() => { setStoredArea(selectedArea); }, [selectedArea]);
 
   // 10초 타임아웃 — API 응답 없어도 강제 로딩 종료
   useEffect(() => {
@@ -261,13 +320,18 @@ export function MonitoringClient({ initialDateTime }: Props) {
       // 사업장 목록 설정
       setApiBusinesses(bizData.items);
       if (!selectedBusiness) {
-        // default-map의 area_id로 사업장 자동 매칭 (이름 하드코딩 대신)
+        // 1) 마지막 사용 사업장 (다른 페이지와 공유) 우선
+        const stored = getStoredBusiness();
+        const storedBiz = stored
+          ? bizData.items.find((b) => String(b.business_id) === stored)
+          : null;
+        // 2) default-map 의 area_id 로 자동 매칭
         const defAreaId = defaultMap?.area_id;
-        let defaultBiz = defAreaId
+        const defaultBizByArea = defAreaId
           ? bizData.items.find((b) => b.areas?.some((a) => a.area_id === defAreaId))
           : null;
-        if (!defaultBiz) defaultBiz = bizData.items[0] ?? null;
-        if (defaultBiz) setSelectedBusiness(String(defaultBiz.business_id));
+        const chosen = storedBiz ?? defaultBizByArea ?? bizData.items[0] ?? null;
+        if (chosen) setSelectedBusiness(String(chosen.business_id));
       }
     });
   }, []);
@@ -289,16 +353,18 @@ export function MonitoringClient({ initialDateTime }: Props) {
       .then((data) => {
         setAreas(data.items);
         if (data.items.length > 0) {
-          // default-map의 area_id가 있으면 그 area를 우선 선택
+          // 1) 마지막 사용 영역 (다른 페이지와 공유) 우선
+          const stored = getStoredArea();
+          const storedArea = stored
+            ? data.items.find((a) => String(a.area_id) === stored)
+            : null;
+          // 2) default-map 의 area_id 폴백
           const defaultAreaId = defaultMapRef.current?.area_id;
           const matchDefault = defaultAreaId
             ? data.items.find((a) => a.area_id === defaultAreaId)
             : null;
-          setSelectedArea(
-            matchDefault
-              ? String(matchDefault.area_id)
-              : String(data.items[0].area_id)
-          );
+          const chosen = storedArea ?? matchDefault ?? data.items[0];
+          setSelectedArea(String(chosen.area_id));
         } else {
           setSelectedArea("");
         }
@@ -438,14 +504,15 @@ export function MonitoringClient({ initialDateTime }: Props) {
       let px = p.x + halfW;
       let py = p.y + halfH;
 
-      // 충전소: DB 좌표(접근 포인트)에서 angle 반대 방향 0.9m = 실제 충전기 위치
+      // 충전소: DB 좌표(도킹 지점)에서 로봇 기준 뒤(angle 반대) 로 이동시켜 표시.
+      // 도킹 후 로봇 본체가 마커를 가리지 않게, 그리고 실제 충전기 본체 자리에 가깝게.
       if (
         p.type === "charging" &&
         p.angle != null &&
         mapMeta &&
         mapMeta.grid_resolution > 0
       ) {
-        const DOCKING_OFFSET_M = 0.0;
+        const DOCKING_OFFSET_M = 0.5;
         const offsetPx = DOCKING_OFFSET_M / mapMeta.grid_resolution;
         px -= offsetPx * Math.cos(p.angle);
         py += offsetPx * Math.sin(p.angle);
@@ -465,13 +532,21 @@ export function MonitoringClient({ initialDateTime }: Props) {
           type: mapPoiTypeToMonitorType(p.type),
           angle: p.angle ?? undefined,
           dockingRadius: p.dockingRadius ?? undefined,
+          lockedByRobot: poiLockMap.get(String(p.id)),
         };
-        // jack POI: rack.specs 크기를 픽셀로 변환
-        if ((p.type === "jack" || p.type === "standby") && mapMeta && mapMeta.grid_resolution > 0) {
-          const RACK_W = 0.83; // meters
-          const RACK_D = 0.87;
+        // 랙 위치(standby) 만 보관된 랙의 사이즈로 마커 크기 분기.
+        // 작업 위치(jack) 는 어떤 사이즈의 랙이든 들어올 수 있으므로 기본 크기(S600) 로 표시.
+        if (p.type === "standby" && mapMeta && mapMeta.grid_resolution > 0) {
+          const rackSize = (p.rackSize ?? p.rack_size) as ("S600" | "S300" | undefined);
+          const isSmall = rackSize === "S300";
+          const RACK_W = isSmall ? 0.73 : 0.83;
+          const RACK_D = isSmall ? 0.74 : 0.87;
           poiData.rackWidthPx = RACK_W / mapMeta.grid_resolution;
           poiData.rackDepthPx = RACK_D / mapMeta.grid_resolution;
+        } else if (p.type === "jack" && mapMeta && mapMeta.grid_resolution > 0) {
+          // 작업 위치: 기본 마커 사이즈 (S600 기준)
+          poiData.rackWidthPx = 0.83 / mapMeta.grid_resolution;
+          poiData.rackDepthPx = 0.87 / mapMeta.grid_resolution;
         }
         convertedPois.push(poiData);
       }
@@ -530,7 +605,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
     setApiWaypoints(convertedWaypoints);
     setApiRouteWaypoints(routePoints);
     setApiRouteSegments(segments);
-  }, [rawApiElements, mapImageSize, mapMeta]);
+  }, [rawApiElements, mapImageSize, mapMeta, poiLockMap]);
 
   // API 사업장 → BusinessSelectBox 형식 변환 (사업장×영역 쌍으로 펼침)
   const businessesForSelectBox: Business[] = useMemo(
@@ -697,12 +772,62 @@ export function MonitoringClient({ initialDateTime }: Props) {
     const targetInterval = setInterval(fetchTargets, 2000);
     fetchTargets();
 
+    // POI 락 폴링 (다중 로봇 조율 표시)
+    const fetchPoiLocks = () => {
+      getPoiLocks()
+        .then(({ locks }) => {
+          setPoiLockMap((prev) => {
+            const next = new Map<string, string>();
+            for (const lk of locks) {
+              next.set(String(lk.poi_id), lk.robot_name ?? `robot#${lk.robot_id}`);
+            }
+            // 변화 없으면 같은 참조 유지 (불필요 리렌더 방지)
+            if (prev.size === next.size) {
+              let same = true;
+              for (const [k, v] of next) {
+                if (prev.get(k) !== v) { same = false; break; }
+              }
+              if (same) return prev;
+            }
+            return next;
+          });
+        })
+        .catch(() => { /* 조용히 무시 */ });
+    };
+    const poiLocksInterval = setInterval(fetchPoiLocks, 5000);
+    fetchPoiLocks();
+
+    // Zone 락 폴링
+    const fetchZoneLocks = () => {
+      getZoneLocks()
+        .then(({ locks }) => {
+          setZoneLocks((prev) => {
+            // 비교 후 동일하면 같은 참조 유지
+            if (prev.length === locks.length) {
+              let same = true;
+              for (let i = 0; i < locks.length; i++) {
+                if (prev[i]?.zone_id !== locks[i].zone_id || prev[i]?.robot_id !== locks[i].robot_id) {
+                  same = false; break;
+                }
+              }
+              if (same) return prev;
+            }
+            return locks;
+          });
+        })
+        .catch(() => {});
+    };
+    const zoneLocksInterval = setInterval(fetchZoneLocks, 5000);
+    fetchZoneLocks();
+
     return () => {
       if (livePollingRef.current) {
         clearInterval(livePollingRef.current);
         livePollingRef.current = null;
       }
       clearInterval(targetInterval);
+      clearInterval(poiLocksInterval);
+      clearInterval(zoneLocksInterval);
     };
   }, [apiRobotsFull]);
 
@@ -908,6 +1033,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
       platform: live?.PLATFORM ?? null,
       busiName: null,
       buildingName: null,
+      robotType: ((robot.robot_type ?? "lifting") as "lifting" | "serving"),
       currentTask: [],
     };
   }, [openDeviceId, apiRobotsFull, liveByIp]);
@@ -1031,7 +1157,7 @@ export function MonitoringClient({ initialDateTime }: Props) {
               </div>
               <div className="left-panel-split__divider" />
               <div className="left-panel-split__bottom">
-                <JackTestPanel
+                <DispatchTabs
                   liveRobots={liveRobots}
                   areaId={selectedArea ? Number(selectedArea) : undefined}
                 />
@@ -1165,6 +1291,25 @@ export function MonitoringClient({ initialDateTime }: Props) {
             className="panel--overlay panel--overlay-right"
           >
             <JobStatusPanel />
+            {zoneLocks.length > 0 && (
+              <div style={{
+                marginTop: 8,
+                padding: "8px 10px",
+                borderRadius: 6,
+                background: "rgba(255, 59, 59, 0.08)",
+                border: "1px solid rgba(255, 59, 59, 0.4)",
+                fontSize: 12,
+              }}>
+                <div style={{ color: "#ff5b5b", fontWeight: 600, marginBottom: 4 }}>
+                  통로 점유 중 ({zoneLocks.length})
+                </div>
+                {zoneLocks.map((z) => (
+                  <div key={z.zone_id} style={{ color: "#eee", lineHeight: 1.4 }}>
+                    {z.zone_name ?? `zone#${z.zone_id}`} ← {z.robot_name ?? `robot#${z.robot_id}`}
+                  </div>
+                ))}
+              </div>
+            )}
           </Panel>
 
           {selectedDevice && (

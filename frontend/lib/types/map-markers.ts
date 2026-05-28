@@ -14,6 +14,8 @@ export type PoiMarkerData = {
   /** 잭킹 POI: 랙 크기 (픽셀 단위, grid_resolution 적용 후) */
   rackWidthPx?: number;
   rackDepthPx?: number;
+  /** 다중 로봇 조율: 이 POI를 점유 중인 로봇 이름 (없으면 미점유) */
+  lockedByRobot?: string;
 };
 
 export type WaypointMarkerData = {

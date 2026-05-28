@@ -85,6 +85,26 @@ export function manualRun(robotId: number, routeId: number) {
   return apiPost<{ message: string; history_id: number }>("/api/tasks/manual-run", { robot_id: robotId, route_id: routeId });
 }
 
+// ── 배치 수동 배차 (여러 로봇 동시 + 반복) ──
+export type BatchAssignment = {
+  robot_id: number;
+  work_mode: "rack_pickup" | "delivery_no_rack" | "simple_move";
+  pickup_poi_id: number;
+  dropoff_poi_id: number;
+  wait_sec: number;
+  /** null 또는 0 = 무한 반복 */
+  repeat_count: number | null;
+};
+
+export type BatchRunResponse = {
+  started: Array<{ robot_id: number; history_id: number; repeat: string }>;
+  skipped: Array<{ robot_id: number; reason: string }>;
+};
+
+export function manualRunBatch(assignments: BatchAssignment[]) {
+  return apiPost<BatchRunResponse>("/api/tasks/manual-run-batch", { assignments });
+}
+
 // ── 이력 ──
 export function getTaskHistory(id: number, params?: { skip?: number; limit?: number }) {
   const q = new URLSearchParams();
@@ -100,4 +120,36 @@ export function getAllHistory(params?: { skip?: number; limit?: number }) {
   if (params?.limit) q.set("limit", String(params.limit));
   const qs = q.toString() ? `?${q}` : "";
   return apiFetch<{ total: number; items: TaskHistory[] }>(`/api/tasks/history/all${qs}`);
+}
+
+// ── POI 락 (다중 로봇 조율) ──
+export type PoiLockEntry = {
+  poi_id: number;
+  poi_name: string | null;
+  robot_id: number;
+  robot_name: string | null;
+};
+
+export function getPoiLocks() {
+  return apiFetch<{ locks: PoiLockEntry[] }>("/api/tasks/poi-locks");
+}
+
+export function releasePoiLocks(robotId: number) {
+  return apiDelete(`/api/tasks/poi-locks/robot/${robotId}`);
+}
+
+// ── Zone 락 ──
+export type ZoneLockEntry = {
+  zone_id: number;
+  zone_name: string | null;
+  robot_id: number;
+  robot_name: string | null;
+};
+
+export function getZoneLocks() {
+  return apiFetch<{ locks: ZoneLockEntry[] }>("/api/tasks/zone-locks");
+}
+
+export function releaseZoneLocks(robotId: number) {
+  return apiDelete(`/api/tasks/zone-locks/robot/${robotId}`);
 }

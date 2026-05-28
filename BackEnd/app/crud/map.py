@@ -195,6 +195,58 @@ def save_robot_map(db: Session, data: dict) -> dict:
     return _map_to_response(rm)
 
 
+def remap_task_waypoints_to_map(db: Session, target_map_id: int) -> dict:
+    """target_map_id 의 POI 이름을 키로, 같은 area 의 다른 맵 POI를 참조 중인
+    TaskRouteWaypoint 들을 target 맵의 같은 이름 POI 로 자동 재매핑.
+
+    반환: {"updated": N, "missing": [<old_poi_name>...], "target_map_id": ...}
+    """
+    from app.models.task import TaskRouteWaypoint
+
+    target = db.query(RobotMap).filter(RobotMap.id == target_map_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="대상 맵을 찾을 수 없습니다")
+    if not target.area_id:
+        raise HTTPException(status_code=400, detail="대상 맵에 area_id 가 없습니다")
+
+    new_pois = db.query(MapPOI).filter(
+        MapPOI.map_id == target_map_id, MapPOI.is_active == True
+    ).all()
+    if not new_pois:
+        return {"updated": 0, "missing": [], "target_map_id": target_map_id}
+    name_to_new_id: dict[str, int] = {p.name: p.id for p in new_pois}
+
+    # 같은 area 의 다른 맵 POI
+    other_pois = db.query(MapPOI).join(RobotMap, MapPOI.map_id == RobotMap.id).filter(
+        RobotMap.area_id == target.area_id,
+        MapPOI.map_id != target_map_id,
+    ).all()
+    if not other_pois:
+        return {"updated": 0, "missing": [], "target_map_id": target_map_id}
+    other_pid_to_name: dict[int, str] = {p.id: p.name for p in other_pois}
+
+    waypoints = db.query(TaskRouteWaypoint).filter(
+        TaskRouteWaypoint.poi_id.in_(list(other_pid_to_name.keys()))
+    ).all()
+    updated = 0
+    missing: list[str] = []
+    for wp in waypoints:
+        old_name = other_pid_to_name.get(wp.poi_id)
+        if not old_name:
+            continue
+        new_id = name_to_new_id.get(old_name)
+        if new_id and new_id != wp.poi_id:
+            logger.info(f"[remap] wp {wp.id} ({old_name}): {wp.poi_id} → {new_id}")
+            wp.poi_id = new_id
+            updated += 1
+        elif not new_id:
+            if old_name not in missing:
+                missing.append(old_name)
+    if updated:
+        db.commit()
+    return {"updated": updated, "missing": missing, "target_map_id": target_map_id}
+
+
 def get_maps_by_area(db: Session, area_id: int) -> list[dict]:
     """특정 영역의 맵 목록 조회."""
     items = (
@@ -308,6 +360,7 @@ def save_map_elements(db: Session, map_id: int, payload: dict) -> dict:
                 address=p.get("address"),
                 docking_radius=p.get("dockingRadius"),
                 area_name=p.get("areaName"),
+                rack_size=p.get("rackSize"),
             )
             db.add(poi)
             db.flush()  # id 확정
@@ -416,6 +469,7 @@ def get_map_elements(db: Session, map_id: int) -> dict:
             "address": p.address,
             "dockingRadius": p.docking_radius,
             "areaName": p.area_name,
+            "rackSize": p.rack_size,
         })
 
     line_list = []

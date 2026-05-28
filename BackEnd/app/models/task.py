@@ -68,15 +68,15 @@ class TaskHistory(Base):
     __tablename__ = "task_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    task_id = Column(Integer, ForeignKey("scheduled_tasks.id", ondelete="SET NULL"), nullable=True)
+    task_id = Column(Integer, ForeignKey("scheduled_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
     task_name = Column(String(200), nullable=True)
     route_name = Column(String(200), nullable=True)
-    robot_id = Column(Integer, nullable=False)
+    robot_id = Column(Integer, nullable=False, index=True)
     robot_name = Column(String(100), nullable=True)
     pickup_poi_name = Column(String(100), nullable=True)
     dropoff_poi_name = Column(String(100), nullable=True)
-    status = Column(String(20), nullable=False, default="running")
-    started_at = Column(DateTime, server_default=func.now(), nullable=False)
+    status = Column(String(20), nullable=False, default="running", index=True)
+    started_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
     finished_at = Column(DateTime, nullable=True)
     error_message = Column(Text, nullable=True)
 

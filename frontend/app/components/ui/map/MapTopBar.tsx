@@ -28,7 +28,9 @@ type MapTopBarProps = {
   onSync: () => void;
   onRelocalize: () => void;
   onDelete: () => void;
+  onApply?: () => void;
   syncDisabled?: boolean;
+  applyDisabled?: boolean;
   onBusinessCreated?: (id: number, name: string) => void;
   onAreaUpdated?: () => void;
 };
@@ -46,7 +48,9 @@ export function MapTopBar({
   onSync,
   onRelocalize,
   onDelete,
+  onApply,
   syncDisabled = true,
+  applyDisabled = false,
   onBusinessCreated,
   onAreaUpdated,
 }: MapTopBarProps) {
@@ -126,6 +130,14 @@ export function MapTopBar({
         </div>
 
         <div className="map-top-bar__center">
+          {onApply && (
+            <button
+              className="map-top-bar__btn"
+              onClick={onApply}
+              disabled={applyDisabled}
+              title="현재 영역의 맵을 모니터링 메인 디폴트로 등록"
+            >적용</button>
+          )}
           <button className="map-top-bar__btn" onClick={onSave}>저장</button>
           <button className="map-top-bar__btn" onClick={onSync} disabled={syncDisabled}>동기화</button>
           <button className="map-top-bar__btn" onClick={onRelocalize}>위치재조정</button>

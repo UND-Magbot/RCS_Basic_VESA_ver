@@ -23,6 +23,7 @@ class Robot(Base):
     charging_id = Column(Integer, ForeignKey("map_pois.id", ondelete="SET NULL"), nullable=True)
     standby_id = Column(Integer, ForeignKey("map_pois.id", ondelete="SET NULL"), nullable=True)
     max_speed = Column(Float, nullable=True, default=1.2)  # 최대 전진 속도 (m/s)
+    robot_type = Column(String(30), nullable=False, default="lifting")  # lifting / serving / delivery 등
     is_active = Column(Boolean, default=True, nullable=False)  # Soft Delete용
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

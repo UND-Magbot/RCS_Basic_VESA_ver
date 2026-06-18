@@ -955,6 +955,20 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
     if not rm:
         raise HTTPException(status_code=404, detail="맵을 찾지 못했습니다.")
 
+    # 타겟 로봇의 area_id 를 동기화하는 맵의 area_id 로 업데이트
+    # (이 로봇이 이제 그 영역에서 운영됨 — VESA 호출 시 같은 area 로봇 우선 배정에 영향)
+    if target_robot and rm.area_id is not None:
+        new_area = str(rm.area_id)
+        if target_robot.area_id != new_area:
+            old_area = target_robot.area_id
+            target_robot.area_id = new_area
+            try:
+                db.commit()
+                logger.info(f"[sync] {robot_label} area_id 업데이트: {old_area} → {new_area} (맵 #{map_id})")
+            except Exception as e:
+                db.rollback()
+                logger.warning(f"[sync] {robot_label} area_id 업데이트 실패: {e}")
+
     # robot_map_id가 있으면 해당 맵을 current-map으로 전환 후 동기화
     if rm.robot_map_id:
         try:

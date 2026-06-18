@@ -219,8 +219,8 @@ def force_return_and_dock(robot_ip: str, robot_id: int | None = None):
 
     work_mode 별 분기:
       - rack_pickup        : 현재 위치에서 잭 업 → 랙 위치(standby POI) 복귀 → 잭 다운 → 충전소
-      - delivery_no_rack
-      - simple_move        : 잭/랙 단계 모두 스킵, 곧장 충전소 복귀
+      - delivery_no_rack   : 안전을 위해 잭 다운 한 번 시도 → 충전소
+      - simple_move        : 잭 조작 없이 곧장 충전소 복귀
 
     work_mode 가 명시되지 않으면 _active_route_jobs 메타에서 추정, 그것도 없으면
     rack_pickup 으로 폴백(랙을 들고 있을 가능성을 가정 — 안전한 디폴트).
@@ -231,6 +231,7 @@ def force_return_and_dock(robot_ip: str, robot_id: int | None = None):
     meta = _active_route_jobs.get(robot_ip) or {}
     work_mode = (meta.get("work_mode") or "rack_pickup")
     is_rack_pickup = (work_mode == "rack_pickup")
+    is_delivery_no_rack = (work_mode == "delivery_no_rack")
 
     logger.warning(f"[force_return] {robot_ip} 강제 종료 시작 (work_mode={work_mode})")
 
@@ -277,8 +278,19 @@ def force_return_and_dock(robot_ip: str, robot_id: int | None = None):
                     logger.warning(f"[force_return] jack_down: {e}")
             else:
                 logger.info(f"[force_return] {robot_ip} 랙 위치 POI 없음 — 충전소만 복귀")
+        elif is_delivery_no_rack:
+            # delivery_no_rack — 잭이 들려 있을 수 있어 안전을 위해 한 번 잭다운 시도 후 충전소
+            update_job_status(robot_ip, status="jacking_down",
+                              message="강제 종료 — 잭 내리는 중")
+            try:
+                jack_down(robot_ip)
+                time.sleep(JACK_WAIT_SEC)
+            except Exception as e:
+                logger.warning(f"[force_return] jack_down: {e}")
+            update_job_status(robot_ip, status="returning",
+                              message="강제 종료 — 충전소로 복귀")
         else:
-            # delivery_no_rack / simple_move — 랙/잭 단계 스킵, 곧장 충전소
+            # simple_move — 잭 조작 없이 곧장 충전소
             update_job_status(robot_ip, status="returning",
                               message=f"강제 종료 — 충전소로 복귀 ({work_mode})")
 
@@ -904,13 +916,12 @@ def run_route_job(
         if on_status:
             on_status(status, message)
         logger.info(f"[route-job] {status}: {message}")
+        # route / total_steps / started_at 은 머지로 보존 — 추가 목적지/복귀 단계에서
+        # 외부 update_job_status 로 갱신한 값이 _notify 다음 호출에 덮어쓰이는 버그 방지.
         update_job_status(ip,
             status=status,
             message=message,
-            route=route_names,
             current_step=step,
-            total_steps=total_steps,
-            started_at=_job_status.get(ip, {}).get("started_at", time.time()),
         )
 
     def _fail(msg: str) -> dict:
@@ -1008,13 +1019,34 @@ def run_route_job(
                     next_poi = get_next_poi(ip)
                     if next_poi is None or next_poi == "return":
                         break
-                    # 다음 포인트로 standard 이동
-                    _notify("moving", f"{next_poi['name']} 이동 중...", 1)
+                    # delivery_no_rack: 잭업 → 이동 → 잭다운 사이클 (simple_move 는 그대로 이동만)
+                    is_delivery = (work_mode == "delivery_no_rack")
+                    total = 3 if is_delivery else 1
+                    update_job_status(ip,
+                        route=f"{current_wp['name']} → {next_poi['name']}",
+                        current_step=0, total_steps=total,
+                    )
+
+                    if is_delivery:
+                        # 잭업 (현재 위치에서)
+                        _notify("jacking_up", f"{current_wp['name']} 잭 올리는 중...", 1)
+                        jack_up(ip)
+                        _interruptible_sleep(ip, JACK_WAIT_SEC)
+
+                    # 이동
+                    _notify("moving", f"{next_poi['name']} 이동 중...", 2 if is_delivery else 1)
                     result = safe_move(ip, "standard", next_poi["x"], next_poi["y"], next_poi.get("ori", 0), timeout=120)
                     if result["state"] != "succeeded":
                         msg = f"{next_poi['name']} 이동 실패: {result.get('fail_message', '')}"
                         log_activity("robot", "move_error", msg, source="jack_service")
                         return _fail(msg)
+
+                    if is_delivery:
+                        # 잭다운 (도착 후)
+                        _notify("jacking_down", f"{next_poi['name']} 잭 내리는 중...", 3)
+                        jack_down(ip)
+                        _interruptible_sleep(ip, JACK_WAIT_SEC)
+
                     current_wp = next_poi
 
             _notify("done", f"완료: {route_names}", total_steps)
@@ -1134,23 +1166,61 @@ def run_route_job(
                     jacked_up = True
 
             elif ptype == "charging" or wtype == "charging":
-                # 충전소: 도킹 전 사전 접근 지점(yaw 반대 60cm) 이동 → charge 명령
+                # 충전소: 사전 접근 POI("<charger_name>-1") 가 있으면 그쪽으로 먼저 이동 후 charge.
+                # 없으면 충전소 POI 좌표 그대로 standard → charge.
                 _notify("charging", f"[{i+1}/{total_steps}] {name} 충전소 접근 중...", i+1)
                 cx, cy = wp["x"], wp["y"]
                 cyaw = wp.get("ori", 0)
-                APPROACH_DIST = 0.6
-                approach_x = cx - APPROACH_DIST * math.cos(cyaw)
-                approach_y = cy - APPROACH_DIST * math.sin(cyaw)
+                # 사전 접근 POI 검색 (같은 영역의 활성 맵에서 이름 매칭)
+                _ap = None
+                _db_ap = None
+                try:
+                    from app.database import SessionLocal as _SL
+                    from app.models.map import MapPOI as _MP, RobotMap as _RM
+                    from app.models.robot import Robot as _RB
+                    _db_ap = _SL()
+                    _r = _db_ap.query(_RB).filter(_RB.ip_address == ip).first()
+                    _map_q = None
+                    if _r and _r.area_id:
+                        _map_q = _db_ap.query(_RM).filter(
+                            _RM.area_id == int(_r.area_id), _RM.is_active == True
+                        ).order_by(_RM.id.desc()).first()
+                    if _map_q:
+                        _apoi = _db_ap.query(_MP).filter(
+                            _MP.map_id == _map_q.id,
+                            _MP.name == f"{name}-1",
+                            _MP.is_active == True,
+                        ).first()
+                        if _apoi and _apoi.world_x is not None:
+                            _ap = {
+                                "name": _apoi.name,
+                                "x": _apoi.world_x,
+                                "y": _apoi.world_y,
+                                "ori": _apoi.angle if _apoi.angle is not None else cyaw,
+                            }
+                except Exception as e:
+                    logger.warning(f"[charge-approach] {ip} 사전 접근 POI 조회 예외: {e}")
+                finally:
+                    if _db_ap is not None:
+                        _db_ap.close()
+
+                if _ap:
+                    sx, sy, syaw = _ap["x"], _ap["y"], _ap["ori"]
+                    _label = f"사전 접근({_ap['name']})"
+                else:
+                    sx, sy, syaw = cx, cy, cyaw
+                    _label = "사전 접근"
+
                 # 1단계: 사전 접근 — best-effort. 실패해도 charge 단계로 진행.
                 try:
-                    _std_id = create_move(ip, "standard", approach_x, approach_y, cyaw)
+                    _std_id = create_move(ip, "standard", sx, sy, syaw)
                     _std_res = wait_move(ip, _std_id, timeout=60)
                     if _std_res.get("state") != "succeeded":
-                        logger.warning(f"[charge-approach] {ip} 사전 접근 실패({_std_res.get('fail_message')}) — 직접 도킹")
+                        logger.warning(f"[charge-approach] {ip} {_label} 실패({_std_res.get('fail_message')}) — 직접 도킹")
                 except RuntimeError:
                     raise
                 except Exception as e:
-                    logger.warning(f"[charge-approach] {ip} 사전 접근 예외: {e} — 직접 도킹")
+                    logger.warning(f"[charge-approach] {ip} {_label} 예외: {e} — 직접 도킹")
                 time.sleep(2)
                 # 2단계: 도킹
                 _notify("charging", f"[{i+1}/{total_steps}] {name} 충전소 도킹 중...", i+1)

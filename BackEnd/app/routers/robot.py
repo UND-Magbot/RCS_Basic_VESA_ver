@@ -907,15 +907,32 @@ def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
         cx = charger.world_x
         cy = charger.world_y
         cyaw = charger.angle if charger.angle is not None else 0
-        # 1) standard로 지정 충전소 근처 이동 (여러 충전소 중 원하는 것 선택하기 위해)
+
+        # 사전 접근 POI ("<charger_name>-1") 같은 맵에서 검색 — 있으면 그쪽으로 먼저 이동
+        ax, ay, ayaw = cx, cy, cyaw
+        approach_name_used = None
+        try:
+            ap = db.query(MapPOI).filter(
+                MapPOI.map_id == charger.map_id,
+                MapPOI.name == f"{charger.name}-1",
+                MapPOI.is_active == True,
+            ).first()
+            if ap and ap.world_x is not None and ap.world_y is not None:
+                ax, ay = ap.world_x, ap.world_y
+                ayaw = ap.angle if ap.angle is not None else cyaw
+                approach_name_used = ap.name
+        except Exception:
+            pass
+
+        # 1) standard로 사전 접근 POI(있으면) 또는 충전소 POI 좌표로 이동
         req.post(
             f"http://{robot_ip}:8090/chassis/moves",
             json={
                 "creator": "rcs",
                 "type": "standard",
-                "target_x": cx,
-                "target_y": cy,
-                "target_ori": cyaw,
+                "target_x": ax,
+                "target_y": ay,
+                "target_ori": ayaw,
             },
             timeout=5,
         )
@@ -940,7 +957,7 @@ def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
             except Exception:
                 pass
         threading.Thread(target=_then_charge, daemon=True).start()
-        return {"ok": True, "charger": charger.name}
+        return {"ok": True, "charger": charger.name, "approach": approach_name_used}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

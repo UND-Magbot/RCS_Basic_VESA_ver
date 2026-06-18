@@ -15,8 +15,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.database import init_db
-from app.routers import user, robot, auth, map, alarm_log, activity_log, backup, log, jack_test, task
+from app.routers import user, robot, auth, map, alarm_log, activity_log, backup, log, jack_test, task, settings, dispatch
 from app.services.scheduler import init_scheduler, shutdown_scheduler
+from app.services import dispatch_service
 # 데드락 감지/양보 기능 비활성화 — 좁은 통로 없는 사이트.
 # 다시 켜려면 아래 import 와 lifespan 의 start/stop 주석을 해제하세요.
 # from app.services import deadlock_monitor
@@ -58,6 +59,11 @@ async def lifespan(application: FastAPI):
     log.info("[startup] init_scheduler...")
     init_scheduler()
     log.info("[startup] init_scheduler done")
+    log.info("[startup] dispatch recovery...")
+    try:
+        dispatch_service.recover_on_startup()
+    except Exception as e:
+        log.warning(f"[startup] dispatch recovery 실패: {e}")
     # 데드락 자동 감지/양보 기능 비활성화 — 사이트에 좁은 통로 없어 양보 불필요
     # 다시 켜려면 아래 두 줄 주석 해제
     # log.info("[startup] deadlock_monitor.start...")
@@ -94,6 +100,8 @@ app.include_router(backup.router)
 app.include_router(log.router)
 app.include_router(jack_test.router)
 app.include_router(task.router)
+app.include_router(settings.router)
+app.include_router(dispatch.router)
 
 
 # 정적 파일 서빙 (맵 이미지 등)

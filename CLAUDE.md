@@ -1,49 +1,100 @@
-# RCS-Basic 프로젝트
+# RCS Basic VESA 프로젝트
 
 ## 언어
 - 모든 답변은 한국어로 작성
 
 ## 프로젝트 개요
-- RCS (Robot Control System) 기본 모델 — 기존 RCS에서 불필요 기능을 제거한 경량화 버전
+- RCS (Robot Control System) **VESA 버전** — Basic 모델에서 분기, 인터랙티브 배차 운영 방식으로 전환
 - AutoXing 로봇 제어 시스템 (crawler_s300_op5 모델, 펌웨어 2.12.21-opi64)
-- 백엔드: FastAPI (Python 3.10) + MySQL
+- 백엔드: FastAPI (Python 3.10) + MariaDB
 - 프론트엔드: Next.js 16 + TypeScript + Three.js (3D 모니터링)
-- DB: MySQL (192.168.0.21, rcs_basic_db)
+- 태블릿: Android WebView 셸 (Kotlin) + 백엔드 서빙 HTML
+- DB: MariaDB (192.168.0.21, **rcs_vesa_db**)
 - 로컬 REST API만 사용 (CSP/클라우드 미사용)
+- GitHub: https://github.com/UND-Magbot/RCS_Basic_VESA_ver (브랜치: `feature/backend_noah`)
+
+## VESA 운영 방식 (인터랙티브 배차 — 핵심)
+
+**위치별 태블릿이 시작 트리거**. 관제 일괄 시작 없음. 작업자가 자기 위치 태블릿에서 호출/다음/종료를 직접 지시.
+
+### 흐름
+```
+[충전소] 로봇 3대 idle
+  ↓
+[호출] 위치 A 태블릿에서 [로봇 호출] → 시스템이 가용 로봇 1대 선정(배터리 1순위)
+  ↓
+[픽업 1회] 선정 로봇: standby → align_with_rack → jack_up
+  ↓
+[이동] 위치 A로 이동 → 도착 (잭 유지)
+  ↓
+[다음 보내기] 위치 A 태블릿에서 비어있는 다른 위치 누름 → 이동 → 도착 (잭 유지)
+  ↓
+[루프] 그 위치 태블릿에서 다음 위치 누르거나 [종료]
+  ↓
+[종료] [작업 종료] → standby 복귀 → jack_down → 충전소 도킹
+```
+
+### 핵심 단순화
+- **align_with_rack 1회**, **jack_up 1회**, **jack_down 1회** (잭 모터 부하 최소화)
+- 포지션 도착 = 잭 유지 상태로 대기 (작업자가 렉 위 화물만 처리)
+- 잭 사이클(픽업/드롭오프마다 업/다운) **없음**
+
+### 상태 머신 (`dispatch_sessions.status`)
+- `starting` → `picking_up` → `moving` → `awaiting_next` ↔ `moving` → `returning` → `completed`/`failed`
+- `returning` 진입 후에는 모든 next/end 명령 **무시**
+
+### POI 점유 / 동시성
+- 3대 동시 운영. `dispatch_sessions.current_poi_id` + `target_poi_id`로 점유 추적
+- 태블릿 그리드에서 다른 로봇 점유 POI는 비활성화 (백엔드도 한 번 더 검증)
+- 호출 시 그 POI를 이미 다른 로봇이 점유 / 그쪽으로 이동 중이면 호출 거부
+- `zone_guard.acquire_zones_for_move`, `poi_lock`은 기존 그대로 활용
+
+### 로봇 자동 배정
+- 가용 로봇 = 활성 워커 없음 (=충전소 대기) + `is_active=True` + `ip_address` 있음
+- 우선순위: **`robot_status.battery_level` 내림차순 → robot_id 오름차순**
+- 가용 로봇 0대면 호출 거부 (태블릿에 "가용 로봇 없음")
 
 ## 디렉토리 구조
 - `BackEnd/` — FastAPI 백엔드
-  - `app/routers/` — API 라우터 (robot, map, log, jack_test 등)
-  - `app/models/` — SQLAlchemy 모델
-  - `app/crud/` — DB CRUD 함수
-  - `app/schemas/` — Pydantic 스키마
+  - `app/routers/` — `auth, user, robot, map, alarm_log, activity_log, backup, log, jack_test, task, **dispatch**`
+  - `app/models/` — SQLAlchemy 모델 (+ `dispatch.py`)
+  - `app/crud/` — DB CRUD (+ `dispatch.py`)
+  - `app/schemas/` — Pydantic (+ `dispatch.py`)
+  - `app/services/` — `dispatch_service`(VESA 워커), `jack_service`, `scheduler`, `zone_guard`, `zone_lock`, `poi_lock`, `geometry`, `deadlock_monitor`, `thread_utils`
+  - `app/constants/` — `robot_types`(work_mode), `rack_specs`(랙 사이즈별)
+  - `app/templates/` — `tablet.html`(레거시), `**dispatch_tablet.html**`(VESA)
 - `frontend/` — Next.js 프론트엔드
-  - `app/monitoring/` — 3D 모니터링 페이지 (Three.js)
-  - `app/map/` — 맵 관리 페이지
-  - `app/robots/` — 로봇 관리 페이지
-  - `app/logs/` — 로그 페이지
-  - `app/settings/` — 설정 페이지
+  - `app/monitoring/` — 3D 모니터링 (Three.js)
+  - `app/map/` — 맵 관리
+  - `app/robots/` — 로봇 관리
+  - `app/tasks/`, `app/routes/`, `app/schedules/` — 레거시 자동 모드용 (VESA에서는 미사용)
+- `TabletApp/` — Android WebView 셸 (`MainActivity.kt`) → `/api/dispatch/tablet/{robot_id}` 로드
 - `docker-compose.yml` — 배포용 Docker 설정
+- `작업일지.md` — 일일 작업 기록 (최신순)
 
-## 제거된 기능 (Basic 모델에서 삭제)
-- Convoy(대열) 작업
-- ACS 인터페이스 (화재경보 수신)
-- 화재경보/비상정지/대피 오버레이
-- WCS 연동
-- 선택적 메뉴 권한 관리
-- 시스템 로그 (별도 테이블)
-- 엑셀 내보내기
-- 작업(Task) 이동 관리
+## VESA 신규 API
 
-## 유지 기능
-- 3D 모니터링 (Three.js)
-- 맵 관리 (매핑, POI, 라인, 폴리곤, 동기화)
-- 로봇 관리 (IP 입력 → 자동 등록)
-- 로그 관리
-- 잭 테스트 (align_with_rack → jack_up → to_unload_point → jack_down)
-- DB 백업/복원
+기본 prefix: `/api/dispatch`
 
-## AutoXing 로봇 API 핵심 정보
+### POI 기준 (신 운영 방식 — 위치별 태블릿)
+| Method | Endpoint | 동작 |
+|---|---|---|
+| POST | `/poi/{poi_id}/call` | 그 POI로 가용 로봇 1대 호출 (배터리 1순위) |
+| POST | `/poi/{poi_id}/next` | body `{next_poi_id}` — 그 POI에 있는 로봇을 비어있는 POI로 보냄 |
+| POST | `/poi/{poi_id}/end` | 그 POI에 있는 로봇만 종료 (standby + 잭다운 + 충전소) |
+| GET | `/poi/{poi_id}/status` | 그 POI의 상태 (empty/calling/arrived) + 가용 다음 POI + 가용 로봇 수 |
+| GET | `/tablet/poi/{poi_id}` | **위치별 태블릿 HTML** (메인 페이지) |
+
+### 로봇/관제 기준 (모니터링/레거시)
+| Method | Endpoint | 동작 |
+|---|---|---|
+| POST | `/start` | (레거시) body `[{robot_id, first_poi_id}]` — 직접 시작 |
+| POST | `/{robot_id}/next`, `/{robot_id}/end` | 로봇 기준 명령 |
+| GET | `/status` | 모든 활성 세션 + 점유 POI 목록 (관제용) |
+| GET | `/{robot_id}/status`, `/{robot_id}/pois` | 로봇 단위 조회 |
+| GET | `/tablet/{robot_id}` | (레거시) — 안내 페이지로 전환됨 |
+
+## AutoXing 로봇 API (변경 없음)
 
 ### REST API
 - 기본 URL: `http://{robot_ip}:8090/`
@@ -54,16 +105,8 @@
 - 설정: `GET/PATCH /system/settings/user`
 - 서비스 재시작: `POST /services/restart_py_axbot`
 
-### 잭킹 흐름 (테스트 완료)
-1. `align_with_rack` — Shelves Point로 이동하며 랙 다리 LiDAR 감지 후 중앙 정렬
-2. `jack_up` — 잭 올리기 (10초 대기)
-3. `to_unload_point` — 드롭오프 위치로 정밀 이동
-4. `jack_down` — 잭 내리기 (10초 대기)
-5. `standard` — 대기장소(W1)로 복귀
-
-### Shelves Point (핵심!)
-- overlay에서 POI type="34", subtype="rack"으로 등록해야 align_with_rack이 동작
-- type이 다르면 로봇이 rack을 인식하지 못함 (failed to find rack 에러)
+### Shelves Point (필수)
+- overlay에 POI `type="34"`, `subtype="rack"`으로 등록해야 `align_with_rack` 동작
 - 필수 속성:
   ```json
   {
@@ -75,24 +118,16 @@
     "mapOverlay": true
   }
   ```
+- PATCH 후 `POST /chassis/current-map` 재선택으로 overlay 리로드
 
-### overlays_version 갱신 문제 (해결됨)
-- API PATCH로 overlay를 수정해도 overlays_version이 올라가지 않음
-- 해결: PATCH 후 `POST /chassis/current-map`으로 같은 맵을 재선택하면 로봇이 overlay 리로드
-- full 동기화 시: 서비스 재시작 → 90초 대기 → Shelves Point PATCH → current-map 재선택
-
-### rack.specs 설정
+### rack.specs (S600)
 ```json
 {
   "rack.specs": [{
-    "width": 0.83,
-    "depth": 0.87,
+    "width": 0.83, "depth": 0.87,
     "margin": [0.05, 0.05, 0.05, 0.05],
-    "alignment": "center",
-    "alignment_margin_back": 0.02,
-    "extra_leg_offset": 0.0,
-    "leg_shape": "other",
-    "leg_size": 0.05,
+    "alignment": "center", "alignment_margin_back": 0.02,
+    "leg_shape": "other", "leg_size": 0.05,
     "foot_radius": 0.025,
     "cargo_to_jack_front_edge_min_distance": 0.05
   }]
@@ -102,158 +137,127 @@
 ### WebSocket 토픽
 - `/detected_rack` — 랙 감지 상태
 - `/jack_state` — 잭 상태 (jacking_up, jacking_down, hold)
-- `/robot_model` — 로봇 풋프린트 (잭 업 시 확장됨)
+- `/robot_model` — 로봇 풋프린트 (잭 업 시 확장)
+- `/planning_state` — 이동 상태 (`is_waiting_for_dest`, `remaining_distance`)
 
-## DB 구조 (rcs_basic_db)
-- `robots` — 로봇 목록 (IP 등록 방식)
-- `robot_maps` — 맵 데이터
-- `map_pois` — POI (poi_type: general, standby, jack)
-- `map_lines` — 라인
-- `map_polygons` — 폴리곤
-- `businesses` — 사업장
-- `areas` — 영역
-- `users` — 사용자
-- `activity_logs` — 활동 로그
+## DB 구조 (rcs_vesa_db)
+
+기존 18개 테이블 + VESA 신규 1개:
+
+| 테이블 | 용도 |
+|---|---|
+| `robots` | 로봇 목록 (IP 등록, `charging_id`, `standby_id`, `max_speed`, `robot_type`) |
+| `robot_status`, `robot_status_history` | 실시간/이력 상태 |
+| `robot_maps` | 맵 메타데이터 (`area_id` 기준 활성 맵) |
+| `map_pois` | POI (`poi_type`: general / standby / jack / charging) |
+| `map_lines`, `map_polygons` | 라인, 폴리곤(zone 포함) |
+| `businesses`, `areas` | 사업장, 영역(층) |
+| `users`, `user_roles` | 사용자 |
+| `activity_logs`, `alarm_logs` | 활동/알람 로그 |
+| `task_routes`, `task_route_waypoints`, `scheduled_tasks`, `task_history` | 레거시 자동 모드용 (VESA 미사용, 데이터 보존) |
+| **`dispatch_sessions`** | **VESA 인터랙티브 배차 세션 (상태 머신 영속)** |
 
 ## 개발 규칙
-- 백엔드 실행: `cd BackEnd && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
+- 백엔드 실행: `cd BackEnd; $env:DB_NAME="rcs_vesa_db"; python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`
 - 프론트엔드 실행: `cd frontend && npm run dev`
-- Git 브랜치: feature/backend_noah → dev
+- Git 브랜치: `feature/backend_noah` → `dev`
 - CSS @import 사용 금지 (Turbopack 호환 문제, globals.css에 인라인)
-- POI world 좌표: DB에 world_x, world_y 저장됨 (pixel 좌표와 별도)
+- POI world 좌표: DB에 `world_x`, `world_y` 저장 (pixel 좌표와 별도)
 - 맵 동기화 시 overlay에 Shelves Point(type=34) 포함 필요
-
-## 남은 작업
-
-### Basic 모델 정리 (미완료)
-- 불필요한 파일 삭제 (tar, sql덤프, 임시파일, mock, static/maps)
-- 백엔드 - Convoy 관련 제거 (라우터, 서비스, 모델)
-- 백엔드 - Task 관련 제거 (라우터, 서비스, 모델, 스키마)
-- 백엔드 - ACS/WCS/시스템로그/권한 제거
-- 백엔드 - main.py/database.py 정리
-- 프론트엔드 - 제거 대상 컴포넌트/페이지 삭제
-- 프론트엔드 - 모니터링/설정 페이지에서 제거된 기능 참조 정리
-- 프론트엔드 - 사이드바/타입 등 나머지 참조 정리
-
-### 잭 테스트 코드 반영 (완료)
-- ~~jack_test.py에 align_with_rack + to_unload_point 흐름 적용~~
-- ~~맵 동기화 시 Shelves Point(type=34) overlay 자동 포함~~
-- ~~overlays_version 갱신 자동화 — PATCH 후 current-map 재선택~~
-
-### 프론트엔드 UI (완료)
-- ~~로딩중 텍스트 전체 제거~~
-- ~~맵 페이지 방화벽/라인 생성 버튼 숨기기~~
-- ~~로봇 등록 (IP 입력 → 자동 정보 조회 → DB 저장)~~
-- ~~로봇 등록 완료 후 리스트 즉시 업데이트~~
-- ~~사업장 생성 기능 맵 드롭다운에 추가~~
-- ~~맵 영역 이름 중복 체크 (매핑 시작 시 사전 체크)~~
-- ~~맵 페이지 작업 포인트 생성 기능 (POI type=jack, 보라색 마커)~~
-- ~~맵/모니터링 작업 포인트 마커: 2D 박스(rack 크기) + V자 쉐브론 방향 (90도 보정)~~
-- ~~3D 모니터링 작업 포인트: Three.js 박스 모델 + 쉐브론~~
-- ~~모니터링/로봇관리/작업관리 데이터 로딩 스피너 추가~~
-- ~~POI 편집 팝업에서 충전소 타입 제거 (상단 버튼으로만 생성)~~
-
-### 작업 관리 시스템 (완료)
-- ~~경로(Route) 모델 — 웨이포인트 순서 + 타입(pickup/dropoff/standby/charging) + 대기시간~~
-- ~~스케줄 모델 — 날짜/시간/요일 기반 (크론 제거), 종료 시간까지 반복 실행~~
-- ~~APScheduler 스케줄러 — once/daily/weekly 트리거, 종료 후 충전소 자동 복귀~~
-- ~~경로 관리 페이지 — 맵에서 POI 클릭으로 경로 편집, 카드 UI (순서변경/타입선택/대기시간)~~
-- ~~스케줄 페이지 — CLOi 스타일 모달 (날짜/시간/반복요일/종료시간)~~
-- ~~수동 배차 — 모니터링 좌측 패널 (로봇+경로 선택 → 즉시 실행, 중지 시 로봇 이동 취소)~~
-- ~~수동 실행 전용 API (스케줄 생성 없이 이력만 기록)~~
-- ~~경로/스케줄 이름 중복 체크~~
-- ~~커스텀 알림/확인 모달 (alert/confirm 대체)~~
-- ~~잭킹 서비스 분리 (jack_service.py) — run_jack_job + run_route_job~~
-- ~~충전소 도킹 로직 (standard 접근 → charge 도킹, charge_retry_count 필수)~~
-- ~~잭 다운 후 고정 대기 + 400 에러 재시도 (5회)~~
-- ~~맵 동기화 시 Shelves Point 중복 방지 (기존 type=34 제거 후 추가)~~
-- ~~사이드바 작업관리 메뉴 + 아이콘~~
-
-### 모니터링 UI (완료)
-- ~~수동 배차 패널 좌측 통합 (로봇 목록 + 수동 배차 상하 분할)~~
-- ~~로봇 리스트 페이지네이션 (5대 단위)~~
-- ~~로봇 이동 경로 표시 (현재 위치 → 목적지 직선 + 목적지 마커, 로봇별 색상)~~
-
-### 태블릿/수동배차 (완료)
-- ~~태블릿 UI 전면 재구성 (수동배차 + 작업상태 메인, 제어패널 모달)~~
-- ~~태블릿 빠른 제어 (잭 업/다운, 이동 취소, 충전소 복귀, 원격 조종)~~
-- ~~태블릿 스케줄 목록 + 즉시 실행/토글~~
-- ~~태블릿 로봇 상태 빠른 조회 API (/quick-status)~~
-- ~~태블릿 로봇 종료 API (/remote/shutdown)~~
-- ~~태블릿 홈/설정 버튼 헤더 이동~~
-- ~~수동배차 출발/복귀 버튼 분리 (waiting_confirm_return)~~
-- ~~잭 업 후 바로 출발 (중간 출발 대기 제거)~~
-- ~~복귀 버튼 누르면 잭 업 → W1 이동 → 잭 다운 자동~~
-- ~~스케줄 시간 범위 밖 실행 버튼 비활성화~~
-- ~~작업 진행 중 실행/종료 버튼 비활성화~~
-
-### S600 랙 지원 (완료)
-- ~~rack.specs: width=0.83, depth=0.87, leg_shape=other, leg_size=0.05~~
-- ~~foot_radius=0.025, margin=[0.05,0.05,0.05,0.05], hasFixedLegs=false~~
-- ~~Shelves Point yaw +180도 보정~~
-- ~~프론트엔드 랙 마커 크기 0.83x0.87~~
-
-### 버그 수정 (완료)
-- ~~_get_standby_poi() 현재 맵 필터 추가 (이전 맵 POI 좌표 사용 버그)~~
-- ~~로봇 목록에 ip 필드 매핑 누락 수정~~
-- ~~속도 저장 버그 수정 (DB 먼저 저장, GET은 DB에서 조회, useCallback 의존성)~~
-- ~~로봇 설정 적용 후 저장 완료 모달 추가~~
-
-### 서버 배포 (완료)
-- ~~Docker Compose 배포 (백엔드 + 프론트엔드)~~
-- ~~docker-compose SERVER_IP 환경변수화 (.env)~~
-- ~~로봇 속도 DB 저장 및 서버 시작 시 자동 적용~~
-
-### 프론트엔드 UI (미완료)
-- 맵핑 시작 시 로봇 미연결 안내창
-- 맵 저장 완료 후 해당 맵 자동 표시
-- 영역 드롭다운 최신 선택
 
 ## 배포 가이드
 
 ### Docker 배포 (서버)
 ```bash
-cd ~/UND_RCS_Basic
+cd ~/RCS_Basic_VESA_ver
 cat > .env << 'EOF'
 SERVER_IP=서버IP
 DB_PORT=3306
 DB_USER=root
 DB_PASSWORD=1234
-DB_NAME=rcs_basic_db
+DB_NAME=rcs_vesa_db
 NEXT_PUBLIC_API_URL=http://서버IP:8002
 EOF
 docker-compose up -d --build
 ```
 
+### rcs_basic_db → rcs_vesa_db 마이그레이션 (완료된 작업 기록)
+```python
+# 1) DB 복제 (스키마 + 데이터)
+import pymysql
+conn = pymysql.connect(host='192.168.0.21', user='root', password='1234', charset='utf8mb4')
+cur = conn.cursor()
+cur.execute("CREATE DATABASE rcs_vesa_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+cur.execute("USE rcs_basic_db"); cur.execute("SHOW TABLES")
+tables = [r[0] for r in cur.fetchall()]
+cur.execute("SET FOREIGN_KEY_CHECKS=0")
+for t in tables:
+    cur.execute(f"CREATE TABLE rcs_vesa_db.`{t}` LIKE rcs_basic_db.`{t}`")
+    cur.execute(f"INSERT INTO rcs_vesa_db.`{t}` SELECT * FROM rcs_basic_db.`{t}`")
+cur.execute("SET FOREIGN_KEY_CHECKS=1")
+conn.commit()
+
+# 2) FK 정의 복원 (CREATE TABLE LIKE는 FK를 미복사 — ALTER로 별도 추가)
+#    information_schema.KEY_COLUMN_USAGE + REFERENTIAL_CONSTRAINTS 조인으로
+#    rcs_basic_db의 FK 22개를 추출해서 rcs_vesa_db에 동일하게 ADD CONSTRAINT
+```
+
 ### IP 변경 시
 1. `.env`의 `SERVER_IP`와 `NEXT_PUBLIC_API_URL` 수정
-2. `docker-compose down && docker rmi und_rcs_basic_frontend && docker-compose build --no-cache frontend && docker-compose up -d`
+2. `docker-compose down && docker rmi rcs_basic_vesa_ver_frontend && docker-compose build --no-cache frontend && docker-compose up -d`
 3. 태블릿 앱 설정에서 서버 주소 변경
-
-### DB 마이그레이션
-```sql
-ALTER TABLE robots ADD COLUMN max_speed FLOAT DEFAULT 1.2;
-```
 
 ### 접속 주소
 - 웹: `http://서버IP:3002`
 - 백엔드 API: `http://서버IP:8002`
-- 태블릿: 앱 설정 → 서버 주소 `http://서버IP:8002`, 로봇 ID 확인
+- 태블릿: 앱 설정 → 서버 주소 `http://서버IP:8002`, **작업 위치 POI ID** 입력 → `/api/dispatch/tablet/poi/{poi_id}` 자동 로드 (태블릿은 위치에 고정)
+
+## 남은 작업
+
+### VESA 모드 (완료)
+- ~~`dispatch_sessions` 모델 + CRUD + 스키마~~
+- ~~`dispatch_service` 워커 스레드 + threading.Event 기반 next/end~~
+- ~~`/api/dispatch/*` 5개 엔드포인트~~
+- ~~`dispatch_tablet.html` 태블릿 UI (POI 그리드, 점유 비활성, 2초 폴링)~~
+- ~~서버 재시작 시 미완료 세션 복구 (`recover_on_startup`)~~
+- ~~`interactive_relay` work_mode 추가~~
+- ~~TabletApp URL 경로 `/api/dispatch/tablet/{id}`로 변경~~
+- ~~`rcs_vesa_db` 마이그레이션 (18 테이블 + FK 22개 복원)~~
+
+### VESA 모드 (미완료/테스트 필요)
+- 3대 동시 운영 시 zone_guard / poi_lock 실전 충돌 시나리오 검증
+- 태블릿 UI 실제 사용 후 UX 다듬기 (현재 폴링 2초 → 필요 시 WebSocket)
+- 운영 중 작업자가 잘못된 POI를 누르는 경우의 백엔드 거부 로그/알림
+
+### 프론트엔드 UI (미완료, 레거시 자동 모드용)
+- 맵핑 시작 시 로봇 미연결 안내창
+- 맵 저장 완료 후 해당 맵 자동 표시
+- 영역 드롭다운 최신 선택
+
+### Basic 정리 (선택 — VESA 분기됐으므로 우선순위 낮음)
+- 레거시 라우터/페이지 정리 (`task`, `routes`, `schedules`) — 운영 안 쓰면 제거 검토
+- 사이드바/타입에서 미사용 메뉴 정리
+- ~~모니터링 좌측 하단 단일/배치 수동배차 패널 제거 (VESA에서 시작은 태블릿이 담당)~~ → `ActiveJobsPanel`만 유지
+- ~~사이드바에서 "작업관리" 메뉴 제거~~ → 페이지 파일(`/tasks/page.tsx`)은 보존
+
+## 미해결 이슈
+- `align_with_rack`에서 `rack_area_id` 사용 불가 (regionType 미확인 — AutoXing 문의 필요)
+- `detectRackSize` REST API 없음 (SDK 전용 — AutoXing 문의 필요)
+- 잭 다운 후 로봇 빠져나오기 시간 불확실 (고정 10초 대기 + 400 에러 시 5초 간격 재시도)
+- `to_unload_point` J1 이동 미작동 이슈 확인 필요
+- 맵 변경 시 경로 웨이포인트 POI ID 자동 매핑 필요 (레거시 자동 모드용 — VESA 영향 없음)
 
 ## 업무일지 양식
+
+`작업일지.md`에 최신 날짜를 위쪽에 `## YYYY-MM-DD` 섹션으로 추가.
+
+외부 보고용 양식:
 ```
 Noah 일일 업무 보고 <YYYY.MM.DD>
 
-1.RCS Basic 모델 개발
+1.RCS Basic VESA 모델 개발
 
 - 작업 내용 1
 - 작업 내용 2
 - ...
 ```
-
-## 미해결 이슈
-- align_with_rack에서 rack_area_id 사용 불가 (regionType 미확인 — AutoXing 문의 필요)
-- detectRackSize REST API 없음 (SDK 전용 — AutoXing 문의 필요)
-- 잭 다운 후 로봇 빠져나오기 시간 불확실 (고정 10초 대기 + 400 에러 시 5초 간격 재시도)
-- to_unload_point J1 이동 미작동 이슈 확인 필요
-- 맵 변경 시 경로 웨이포인트 POI ID 자동 매핑 필요 (현재 수동 DB UPDATE)

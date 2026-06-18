@@ -185,7 +185,11 @@ def _return_rack_to_standby(robot_ip: str):
 
 
 def _return_to_charger(robot_ip: str, wp_list: list[dict]):
-    """작업 종료 후 충전소 복귀"""
+    """작업 종료 후 충전소 복귀.
+
+    사전 접근 POI 규약: 충전소 이름이 "C1" 이면 같은 맵의 "C1-1" POI 가
+    있을 경우 그 위치로 먼저 standard 이동 후 charge 도킹.
+    """
     # 1) 로봇에 지정된 charging_id 우선 사용
     charger = None
     db = SessionLocal()
@@ -202,6 +206,7 @@ def _return_to_charger(robot_ip: str, wp_list: list[dict]):
                     "x": charging_poi.world_x,
                     "y": charging_poi.world_y,
                     "ori": charging_poi.angle or 0,
+                    "map_id": charging_poi.map_id,
                 }
     finally:
         db.close()
@@ -227,6 +232,7 @@ def _return_to_charger(robot_ip: str, wp_list: list[dict]):
                     "x": charging_poi.world_x,
                     "y": charging_poi.world_y,
                     "ori": charging_poi.angle or 0,
+                    "map_id": charging_poi.map_id,
                 }
         finally:
             db.close()
@@ -235,7 +241,31 @@ def _return_to_charger(robot_ip: str, wp_list: list[dict]):
         logger.info("[scheduler] 충전소 POI 없음, 복귀 생략")
         return
 
-    logger.info(f"[scheduler] 충전소 복귀: {charger['name']}")
+    # 4) 사전 접근 POI ("<charger_name>-1") 검색 — 같은 맵에 존재하면 그쪽으로 먼저 이동
+    approach = None
+    approach_name = f"{charger['name']}-1"
+    if charger.get("map_id"):
+        _db = SessionLocal()
+        try:
+            ap = _db.query(MapPOI).filter(
+                MapPOI.map_id == charger["map_id"],
+                MapPOI.name == approach_name,
+                MapPOI.is_active == True,
+            ).first()
+            if ap and ap.world_x is not None:
+                approach = {
+                    "name": ap.name,
+                    "x": ap.world_x,
+                    "y": ap.world_y,
+                    "ori": ap.angle if ap.angle is not None else charger.get("ori", 0),
+                }
+        finally:
+            _db.close()
+
+    logger.info(
+        f"[scheduler] 충전소 복귀: {charger['name']}"
+        + (f" (사전 접근 {approach['name']} 경유)" if approach else "")
+    )
     try:
         from app.services.jack_service import create_move, wait_move, safe_move, update_job_status
         import time as _time
@@ -245,25 +275,27 @@ def _return_to_charger(robot_ip: str, wp_list: list[dict]):
         cx, cy = charger["x"], charger["y"]
         cyaw = charger.get("ori", 0)
 
-        # 사전 접근 지점 (도킹 지점에서 yaw 반대 방향 60cm)
-        APPROACH_DIST = 0.6  # m
-        approach_x = cx - APPROACH_DIST * _math.cos(cyaw)
-        approach_y = cy - APPROACH_DIST * _math.sin(cyaw)
-
-        # 1단계: standard 사전 접근 — best-effort (실패해도 charge 로 직접 진행)
-        # `failed to calc global path` 등 경로 계산 불가 케이스가 자주 발생하므로 무한 재시도 X.
+        # 1단계: standard 로 사전 접근 POI(있으면) 또는 충전소 POI 자체로 이동 — best-effort.
+        # 운영자가 같은 맵에 "<charger_name>-1" 이름의 사전 접근 POI 를 등록해 두면 그쪽으로 먼저.
+        if approach:
+            std_x, std_y, std_yaw = approach["x"], approach["y"], approach["ori"]
+            std_label = f"사전 접근({approach['name']})"
+            update_job_status(robot_ip, message=f"사전 접근({approach['name']})로 이동 중")
+        else:
+            std_x, std_y, std_yaw = cx, cy, cyaw
+            std_label = "사전 접근"
         try:
-            std_move = create_move(robot_ip, "standard", approach_x, approach_y, cyaw)
+            std_move = create_move(robot_ip, "standard", std_x, std_y, std_yaw)
             std_result = wait_move(robot_ip, std_move, timeout=60)
             if std_result.get("state") != "succeeded":
                 logger.warning(
-                    f"[scheduler] 사전 접근 실패({std_result.get('fail_message') or std_result.get('state')}) "
+                    f"[scheduler] {std_label} 실패({std_result.get('fail_message') or std_result.get('state')}) "
                     f"— charge 단계로 직접 진행"
                 )
         except RuntimeError:
             raise
         except Exception as e:
-            logger.warning(f"[scheduler] 사전 접근 예외: {e} — charge 단계로 직접 진행")
+            logger.warning(f"[scheduler] {std_label} 예외: {e} — charge 단계로 직접 진행")
         _time.sleep(2)
 
         # 2단계: charge로 도킹 (target_ori 명시, 재시도)

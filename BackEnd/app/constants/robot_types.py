@@ -2,7 +2,7 @@
 
 # 로봇 타입별 허용되는 work_mode 목록
 ROBOT_TYPE_WORK_MODES = {
-    "lifting": ["rack_pickup", "delivery_no_rack", "simple_move"],
+    "lifting": ["rack_pickup", "delivery_no_rack", "simple_move", "interactive_relay"],
     "serving": ["simple_move"],
 }
 

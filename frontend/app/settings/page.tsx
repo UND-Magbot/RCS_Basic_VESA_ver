@@ -83,29 +83,69 @@ export default function SettingsPage() {
   );
 }
 
+const API = process.env.NEXT_PUBLIC_API_URL || "";
+const DEFAULT_SYSTEM_NAME = "UND RCS";
+
 function SystemNameTab() {
   const [name, setName] = useState("");
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const v = localStorage.getItem("system_name") || "";
-    setName(v);
+    fetch(`${API}/api/settings/system-name`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r)))
+      .then((data) => {
+        const v = data?.system_name === DEFAULT_SYSTEM_NAME ? "" : (data?.system_name || "");
+        setName(v);
+      })
+      .catch(() => {
+        // 서버 실패 시 fallback — 이전 localStorage 값
+        const v = localStorage.getItem("system_name") || "";
+        setName(v);
+      });
   }, []);
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const trimmed = name.trim();
-    localStorage.setItem("system_name", trimmed);
-    window.dispatchEvent(new CustomEvent("system-name-change", { detail: trimmed }));
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/api/settings/system-name`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system_name: trimmed }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      const effective = data?.system_name || DEFAULT_SYSTEM_NAME;
+      // 같은 탭의 TopBar 등 즉시 갱신용 이벤트
+      window.dispatchEvent(new CustomEvent("system-name-change", { detail: effective }));
+      // 호환: 이전 코드가 읽는 localStorage 도 같이 갱신
+      if (trimmed) localStorage.setItem("system_name", trimmed);
+      else localStorage.removeItem("system_name");
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e: any) {
+      setError(`저장 실패: ${e?.message || e}`);
+    }
   };
 
-  const handleReset = () => {
-    localStorage.removeItem("system_name");
-    window.dispatchEvent(new CustomEvent("system-name-change", { detail: "UND RCS" }));
+  const handleReset = async () => {
     setName("");
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/api/settings/system-name`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system_name: "" }),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      localStorage.removeItem("system_name");
+      window.dispatchEvent(new CustomEvent("system-name-change", { detail: DEFAULT_SYSTEM_NAME }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e: any) {
+      setError(`초기화 실패: ${e?.message || e}`);
+    }
   };
 
   return (
@@ -145,6 +185,7 @@ function SystemNameTab() {
           기본값으로
         </button>
         {saved && <span style={{ alignSelf: "center", color: "var(--color-success, #4caf50)", fontSize: 13 }}>저장됨</span>}
+        {error && <span style={{ alignSelf: "center", color: "var(--color-error, #e94560)", fontSize: 13 }}>{error}</span>}
       </div>
     </div>
   );

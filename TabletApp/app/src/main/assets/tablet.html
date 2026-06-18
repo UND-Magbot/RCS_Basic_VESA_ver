@@ -61,6 +61,14 @@ body { font-family:'Noto Sans KR',sans-serif; background:#1a1a2e; color:#fff;
 #btn-home     { left:12px; }
 #btn-settings { right:12px; }
 
+#system-name {
+  position:fixed; top:14px; left:50%; transform:translateX(-50%);
+  font-size:clamp(1.1rem,2.8vw,1.6rem); font-weight:700;
+  color:rgba(255,255,255,0.55); letter-spacing:0.02em;
+  white-space:nowrap; max-width:60vw; overflow:hidden; text-overflow:ellipsis;
+  z-index:1001; pointer-events:none;
+}
+
 .stuck-banner {
   display:none; position:fixed; top:0; left:0; right:0;
   background:linear-gradient(135deg,#e94560,#c23152); color:#fff;
@@ -84,6 +92,7 @@ body { font-family:'Noto Sans KR',sans-serif; background:#1a1a2e; color:#fff;
 
 <button class="corner-btn" id="btn-home"     onclick="if(window.Android) Android.goHome()">⌂</button>
 <button class="corner-btn" id="btn-settings" onclick="if(window.Android) Android.openSettings()">⚙</button>
+<div id="system-name">UND RCS</div>
 
 <div class="stuck-banner" id="stuckBanner">장애물 감지 — 작업중입니다. 비켜주세요!</div>
 <div id="offline-banner">서버 재연결 중... <span id="retryCount"></span></div>
@@ -287,12 +296,27 @@ async function doConfirm() {
   }
 }
 
+// 시스템 이름 (서버의 RCS 설정과 동기화) — 페이지 로드 + 60초마다 갱신
+function fetchSystemName() {
+  var el = document.getElementById('system-name');
+  if (!el) return;
+  fetch(SERVER_URL + '/api/settings/system-name')
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(d) {
+      if (d && d.system_name) el.textContent = d.system_name;
+    })
+    .catch(function() { /* 오프라인 — 마지막 값 유지 */ });
+}
+var systemNamePolling = setInterval(fetchSystemName, 60000);
+fetchSystemName();
+
 function initApp() {
   ROBOT_ID = window.ROBOT_ID || ROBOT_ID;
   SERVER_URL = window.SERVER_URL || SERVER_URL;
   stuckAudio = null;
   if (polling) clearInterval(polling);
   fetchStatus();
+  fetchSystemName();
   polling = setInterval(fetchStatus, RETRY_INTERVAL_MS);
 }
 

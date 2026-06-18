@@ -981,9 +981,12 @@ def tablet_page(robot_id: int, db: Session = Depends(get_db)):
     ).all()
     poi_options = "".join(f'<option value="{p.id}">{p.name}</option>' for p in pois)
 
+    robot_type = (getattr(robot, "robot_type", None) or "lifting") if robot else "lifting"
+
     html = _TABLET_TEMPLATE.read_text(encoding="utf-8")
     html = html.replace("{{ROBOT_NAME}}", robot_name)
     html = html.replace("{{ROBOT_ID}}", str(robot_id))
     html = html.replace("{{ROBOT_IP}}", robot_ip)
+    html = html.replace("{{ROBOT_TYPE}}", robot_type)
     html = html.replace("{{POI_OPTIONS}}", poi_options)
     return HTMLResponse(content=html)

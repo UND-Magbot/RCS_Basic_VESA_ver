@@ -13,7 +13,7 @@ import { LayerButton } from "../components/ui/monitoring/LayerButton";
 import { MapModeButton } from "../components/ui/monitoring/MapModeButton";
 import { DeviceRow } from "../components/ui/monitoring/DeviceRow";
 import { RemoteControlModal } from "../components/ui/monitoring/RemoteControlModal";
-import { JobStatusPanel } from "../components/ui/monitoring/JobStatusPanel";
+import { OperationsDashboard } from "../components/ui/monitoring/OperationsDashboard";
 import { RobotDeviceInfo } from "../components/ui/RobotDeviceInfo";
 import type { RobotDevice, RunState } from "@/lib/types/robots";
 import {
@@ -41,10 +41,6 @@ const MonitoringMap3D = dynamic(
 );
 import type { PoiMarkerData, RobotMarkerData, RouteSegment, WaypointMarkerData } from "@/lib/types/map-markers";
 import { BusinessSelectBox } from "../components/ui/monitoring/BusinessSelectBox";
-import { JackTestPanel } from "../components/ui/monitoring/JackTestPanel";
-import { BatchDispatchPanel } from "../components/ui/monitoring/BatchDispatchPanel";
-import { ActiveJobsPanel } from "../components/ui/monitoring/ActiveJobsPanel";
-import "../components/ui/monitoring/JackTestPanel.css";
 import { apiFetch } from "@/lib/api";
 import { getPoiLocks, getZoneLocks } from "@/lib/api/tasks";
 import type { ZoneLockEntry } from "@/lib/api/tasks";
@@ -54,48 +50,8 @@ import {
 import type { Business } from "@/lib/types/robots";
 import type { MapMeta } from "@/lib/types/map";
 
-function DispatchTabs({ liveRobots, areaId }: { liveRobots: any[]; areaId?: number }) {
-  const [mode, setMode] = useState<"single" | "batch">("single");
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* 작업 중 로봇 카드는 단일/배치 모드 무관 공통 표시 */}
-      <ActiveJobsPanel liveRobots={liveRobots} areaId={areaId} />
-      <div style={{ display: "flex", gap: 4, padding: "8px 12px 0", borderBottom: "1px solid var(--border-color)" }}>
-        <button
-          onClick={() => setMode("single")}
-          style={{
-            background: "transparent",
-            border: "none",
-            padding: "6px 12px",
-            cursor: "pointer",
-            fontSize: 12,
-            borderBottom: mode === "single" ? "2px solid var(--color-primary, #36dfc8)" : "2px solid transparent",
-            color: mode === "single" ? "var(--color-primary, #36dfc8)" : "var(--text-muted)",
-            fontWeight: mode === "single" ? 600 : 400,
-          }}
-        >단일</button>
-        <button
-          onClick={() => setMode("batch")}
-          style={{
-            background: "transparent",
-            border: "none",
-            padding: "6px 12px",
-            cursor: "pointer",
-            fontSize: 12,
-            borderBottom: mode === "batch" ? "2px solid var(--color-primary, #36dfc8)" : "2px solid transparent",
-            color: mode === "batch" ? "var(--color-primary, #36dfc8)" : "var(--text-muted)",
-            fontWeight: mode === "batch" ? 600 : 400,
-          }}
-        >배치 (여러 대)</button>
-      </div>
-      <div style={{ flex: 1, overflow: "auto" }}>
-        {mode === "single"
-          ? <JackTestPanel liveRobots={liveRobots} areaId={areaId} />
-          : <BatchDispatchPanel liveRobots={liveRobots} areaId={areaId} />}
-      </div>
-    </div>
-  );
-}
+// VESA 운영: 시작/배차는 위치별 태블릿이 담당.
+// 관제 화면은 로봇 리스트와 3D 맵만 노출 — 작업 현황 카드는 태블릿/세션 페이지로 이관.
 
 type BusinessItem = {
   business_id: number;
@@ -1155,13 +1111,6 @@ export function MonitoringClient({ initialDateTime }: Props) {
                   )}
                 </div>
               </div>
-              <div className="left-panel-split__divider" />
-              <div className="left-panel-split__bottom">
-                <DispatchTabs
-                  liveRobots={liveRobots}
-                  areaId={selectedArea ? Number(selectedArea) : undefined}
-                />
-              </div>
             </div>
           </Panel>
 
@@ -1177,33 +1126,8 @@ export function MonitoringClient({ initialDateTime }: Props) {
                 businesses={businessesForSelectBox}
                 selectedId={`${selectedBusiness}:${selectedArea}`}
                 onChange={handleBusinessAreaChange}
-                extraButton={selectedArea && apiRobotsFull.length > 0 ? (
-                  <button
-                    className="btn btn--ghost"
-                    style={{ fontSize: 13, whiteSpace: "nowrap", padding: "4px 10px" }}
-                    onClick={async () => {
-                      const robotId = apiRobotsFull[0]?.id;
-                      if (!robotId) return;
-                      try {
-                        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || ""}/api/robots/${robotId}/switch-floor`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ area_id: Number(selectedArea) }),
-                        });
-                        if (res.ok) {
-                          const d = await res.json();
-                          showAlert({ title: "층 전환", message: `층 전환 완료: ${d.map_name}` });
-                          window.location.reload();
-                        } else if (res.status === 409) {
-                          showAlert({ title: "층 전환", message: "로봇이 작업 중입니다" });
-                        } else {
-                          const d = await res.json();
-                          showAlert({ title: "층 전환", message: d.detail || "층 전환 실패" });
-                        }
-                      } catch { showAlert({ title: "층 전환", message: "연결 오류" }); }
-                    }}
-                  >층 전환</button>
-                ) : undefined}
+                // VESA: 관제에서 "층 전환" 미사용 — 맵 동기화 시 area_id 자동 갱신 (map.py)
+                extraButton={undefined}
               />
               {isLoading ? (
                 <div className="monitoring-map__loading">
@@ -1281,16 +1205,16 @@ export function MonitoringClient({ initialDateTime }: Props) {
             </div>
           </div>
 
-          {/* 오른쪽 작업 현황 패널 */}
+          {/* 오른쪽 운영 현황 패널 */}
           <Panel
-            title="작업 현황"
+            title="운영 현황"
             collapsed={rightCollapsed}
             collapsedTogglePosition="start"
             onToggle={() => setRightCollapsed((v) => !v)}
             toggleIcon="left"
             className="panel--overlay panel--overlay-right"
           >
-            <JobStatusPanel />
+            <OperationsDashboard areaId={selectedArea ? Number(selectedArea) : undefined} />
             {zoneLocks.length > 0 && (
               <div style={{
                 marginTop: 8,

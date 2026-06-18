@@ -7,7 +7,7 @@ import type { NavItem, SideNavProps } from "@/lib/types/shell";
 export const defaultNavItems: NavItem[] = [
   { label: "모니터링", href: "/monitoring", match: "/monitoring", icon: "/icon/monitoring.svg" },
   { label: "로봇관리", href: "/robots", match: "/robots", icon: "/icon/robot.svg" },
-  { label: "작업관리", href: "/tasks", match: "/tasks", icon: "/icon/task.svg" },
+  // VESA 운영: 작업관리(자동 경로/스케줄) 메뉴는 미사용 — 페이지 파일은 보존(직접 URL 접근만 가능)
   { label: "통계", href: "/stats", match: "/stats", icon: "/icon/stats.svg" },
   { label: "로그관리", href: "/logs", match: "/logs", icon: "/icon/log.svg" },
   { label: "맵관리", href: "/map", match: "/map", icon: "/icon/map.svg" },

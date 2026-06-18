@@ -137,9 +137,12 @@ export function JobStatusPanel() {
   const [notification, setNotification] = useState<string | null>(null);
 
   const handleForceReturn = async (ip: string, workMode?: string) => {
-    const msg = workMode === "rack_pickup"
-      ? "강제 종료하시겠습니까?\n랙을 원래 위치(랙 보관 지점)에 두고 충전소로 복귀합니다."
-      : "강제 종료하시겠습니까?\n현재 작업을 중단하고 곧바로 충전소로 복귀합니다.";
+    let msg = "강제 종료하시겠습니까?\n현재 작업을 중단하고 곧바로 충전소로 복귀합니다.";
+    if (workMode === "rack_pickup") {
+      msg = "강제 종료하시겠습니까?\n랙을 원래 위치(R1)에 두고 충전소로 복귀합니다.";
+    } else if (workMode === "delivery_no_rack") {
+      msg = "강제 종료하시겠습니까?\n잭을 내린 뒤 충전소로 복귀합니다.";
+    }
     if (!confirm(msg)) return;
     try {
       await fetch(`${API}/api/robots/remote/force-return/${ip}`, { method: "POST" });

@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title id="page-title">{{POI_NAME}}</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+      background: #0e1118;
+      color: #f0f3fa;
+      user-select: none;
+      overflow: hidden;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px;
+      background: #181d28;
+      border-bottom: 1px solid #232a39;
+    }
+    header h1 { margin: 0; font-size: 22px; font-weight: 700; }
+    .badge {
+      padding: 6px 14px; border-radius: 999px;
+      font-size: 13px; font-weight: 600;
+      background: #1f2733; color: #b9c1d0;
+    }
+    .badge.empty { background: #2b323e; color: #8a93a6; }
+    .badge.calling { background: #1e3a5a; color: #6db5ff; }
+    .badge.arrived { background: #1e4d33; color: #6dd99b; }
+    .badge.returning { background: #4d2a1e; color: #ffa46d; }
+
+    main {
+      padding: 20px;
+      height: calc(100vh - 64px);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .panel {
+      background: #181d28;
+      border: 1px solid #232a39;
+      border-radius: 14px;
+      padding: 18px 20px;
+    }
+    .panel h2 {
+      margin: 0 0 12px;
+      font-size: 14px;
+      color: #8a93a6;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+    }
+
+    /* 빈 상태 — 호출 버튼 */
+    .call-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 20px;
+    }
+    .call-info {
+      font-size: 18px;
+      color: #8a93a6;
+      text-align: center;
+    }
+    .call-info b { color: #f0f3fa; font-size: 20px; }
+    .call-btn {
+      padding: 32px 64px;
+      font-size: 28px;
+      font-weight: 700;
+      background: #2f6fff;
+      color: #fff;
+      border: none;
+      border-radius: 18px;
+      cursor: pointer;
+      min-width: 280px;
+      box-shadow: 0 8px 20px rgba(47, 111, 255, 0.3);
+      transition: transform 0.05s, opacity 0.15s;
+    }
+    .call-btn:active { transform: scale(0.97); }
+    .call-btn:disabled { background: #2a3343; box-shadow: none; cursor: not-allowed; opacity: 0.5; }
+
+    .call-btn-row {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    .call-btn-row .call-btn {
+      min-width: 280px;
+      padding: 24px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+    }
+    .call-btn-row .call-btn .big {
+      font-size: 26px;
+      font-weight: 700;
+    }
+    .call-btn-row .call-btn .small {
+      font-size: 13px;
+      font-weight: 500;
+      opacity: 0.85;
+    }
+    .call-btn--rack    { background: #2f6fff; }
+    .call-btn--norack  { background: #4a5568; box-shadow: 0 8px 20px rgba(74, 85, 104, 0.3); }
+
+    /* 도착 / 호출 중 상태 */
+    .robot-info {
+      display: flex;
+      gap: 24px;
+      align-items: center;
+      padding: 16px 20px;
+      background: #1d2a4d;
+      border: 1px solid #2f4d7d;
+      border-radius: 14px;
+    }
+    .robot-info .name { font-size: 24px; font-weight: 700; }
+    .robot-info .meta { font-size: 14px; color: #8a93a6; margin-top: 4px; }
+    .robot-info .battery {
+      margin-left: auto;
+      font-size: 22px;
+      font-weight: 600;
+      color: #6dd99b;
+    }
+
+    /* POI 그리드 */
+    .grid {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      grid-auto-rows: 110px;   /* 각 셀 높이 고정 */
+      gap: 14px;
+      overflow-y: auto;
+      align-content: start;     /* 위쪽부터 채움 (남는 세로 공간이 늘어나지 않음) */
+    }
+    .poi-btn {
+      padding: 20px 12px;
+      border: 1px solid #2a3343;
+      border-radius: 14px;
+      background: #20283a;
+      color: #f0f3fa;
+      font-size: 20px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.05s, background 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .poi-btn:hover { background: #2a3548; }
+    .poi-btn:active { transform: scale(0.96); }
+    .poi-btn.occupied {
+      background: #1a1f2a;
+      color: #555c6b;
+      border-color: #2a3343;
+      cursor: not-allowed;
+    }
+    .action-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 12px;
+    }
+    .btn {
+      padding: 16px 28px;
+      border: none;
+      border-radius: 12px;
+      font-size: 17px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-danger { background: #c94545; color: #fff; }
+
+    .toast {
+      position: fixed;
+      bottom: 24px; left: 50%; transform: translateX(-50%);
+      padding: 14px 22px;
+      background: #1f2733; color: #f0f3fa;
+      border-radius: 10px;
+      font-size: 14px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+      max-width: 80vw;
+    }
+    .toast.show { opacity: 1; }
+
+    .empty-state {
+      grid-column: 1 / -1;
+      padding: 40px 20px;
+      text-align: center;
+      color: #555c6b;
+    }
+
+    /* ── 강제 제어 모달 ── */
+    .header-btn {
+      background: #2a3343;
+      color: #b9c1d0;
+      border: none;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      cursor: pointer;
+      margin-left: 8px;
+    }
+    .header-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .header-right { display: flex; align-items: center; }
+
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal-backdrop.show { display: flex; }
+    .modal {
+      background: #181d28;
+      border: 1px solid #232a39;
+      border-radius: 16px;
+      padding: 24px;
+      width: min(480px, 92vw);
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+    }
+    .modal .desc {
+      font-size: 13px;
+      color: #8a93a6;
+      margin-bottom: 18px;
+    }
+    .ctrl-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .ctrl-btn {
+      padding: 18px 12px;
+      border: 1px solid #2a3343;
+      border-radius: 12px;
+      background: #20283a;
+      color: #f0f3fa;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .ctrl-btn:active { transform: scale(0.97); }
+    .ctrl-btn.purple { background: #3a285a; border-color: #4d3a73; }
+    .ctrl-btn.amber  { background: #5a4a1e; border-color: #735f2d; }
+    .ctrl-btn.teal   { background: #1e4d4d; border-color: #2d6f6f; }
+    .ctrl-btn.blue   { background: #1e3a5a; border-color: #2d5680; }
+    .modal-close {
+      width: 100%;
+      margin-top: 16px;
+      padding: 12px;
+      background: transparent;
+      border: 1px solid #2a3343;
+      border-radius: 10px;
+      color: #b9c1d0;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    /* 하단 우측 강제 제어 (fixed) — 종료 버튼과 겹치지 않게 우측 배치 */
+    .force-btn-fixed {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      padding: 14px 24px;
+      background: #c94545;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.5);
+      z-index: 50;
+    }
+    .force-btn-fixed:active { transform: scale(0.97); }
+    .force-btn-fixed:disabled {
+      background: #2a3343;
+      color: #555c6b;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .force-btn-fixed.hidden { display: none; }
+
+    /* 종료 버튼 영역 — 강제 제어 버튼과 겹치지 않게 우측 여백 확보 */
+    .action-row {
+      margin-right: 140px;  /* 강제 제어 버튼 폭 만큼 비움 */
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="title">{{POI_NAME}}</h1>
+    <div class="header-right">
+      <span id="badge" class="badge">상태 확인 중...</span>
+      <button class="header-btn" id="config-btn" onclick="openConfig()" title="슬롯 설정">⚙</button>
+    </div>
+  </header>
+
+  <!-- 하단 왼쪽 강제 제어 (운영 모드에서만 표시) -->
+  <button class="force-btn-fixed" id="force-btn" onclick="openForceCtrl()" disabled>강제 제어</button>
+
+  <main id="main"></main>
+
+  <!-- 슬롯 설정 모달 -->
+  <div class="modal-backdrop" id="config-modal">
+    <div class="modal">
+      <h3 id="config-title">슬롯 설정</h3>
+      <div class="desc">이 태블릿에 매핑할 작업 위치(POI)를 선택하세요. 저장 후 그 위치 운영 화면으로 전환됩니다.</div>
+      <div style="display:flex; flex-direction:column; gap:12px">
+        <div>
+          <div style="font-size:13px; color:#8a93a6; margin-bottom:6px">슬롯 번호</div>
+          <input type="number" id="cfg-slot" style="width:100%; padding:12px; background:#0e1118; color:#f0f3fa; border:1px solid #2a3343; border-radius:8px; font-size:18px" />
+        </div>
+        <div>
+          <div style="font-size:13px; color:#8a93a6; margin-bottom:6px">작업 위치 (POI)</div>
+          <select id="cfg-poi" style="width:100%; padding:12px; background:#0e1118; color:#f0f3fa; border:1px solid #2a3343; border-radius:8px; font-size:16px">
+            <option value="">불러오는 중...</option>
+          </select>
+        </div>
+        <div>
+          <div style="font-size:13px; color:#8a93a6; margin-bottom:6px">별명 (선택)</div>
+          <input type="text" id="cfg-alias" placeholder="예: 1라인 입구" style="width:100%; padding:12px; background:#0e1118; color:#f0f3fa; border:1px solid #2a3343; border-radius:8px; font-size:16px" />
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:16px">
+        <button class="btn btn-primary" style="flex:1" onclick="saveConfig()">저장</button>
+        <button class="modal-close" style="flex:0 0 110px; margin-top:0" onclick="closeConfig()">취소</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 확인(confirm) 모달 -->
+  <div class="modal-backdrop" id="confirm-modal">
+    <div class="modal" style="width: min(440px, 92vw)">
+      <h3 id="confirm-title">확인</h3>
+      <div class="desc" id="confirm-msg" style="font-size: 15px; color: #cfd6e4; line-height: 1.55; margin-bottom: 22px"></div>
+      <div style="display:flex; gap:10px">
+        <button class="modal-close" id="confirm-cancel" style="flex:1; margin-top:0">취소</button>
+        <button class="btn btn-danger" id="confirm-ok" style="flex:1; padding:14px">확인</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 강제 제어 모달 -->
+  <div class="modal-backdrop" id="force-modal">
+    <div class="modal">
+      <h3>강제 제어</h3>
+      <div class="desc" id="force-desc">현재 위치에 있는 로봇에 직접 명령합니다 (자동 동작 멈췄을 때 사용).</div>
+      <div class="ctrl-grid">
+        <button class="ctrl-btn purple" onclick="forceCtrl('jack_up','잭 업')">잭 업</button>
+        <button class="ctrl-btn purple" onclick="forceCtrl('jack_down','잭 다운')">잭 다운</button>
+        <button class="ctrl-btn amber"  onclick="forceCtrl('cancel_move','이동 취소')">이동 취소</button>
+        <button class="ctrl-btn teal"   onclick="forceCtrl('dock','충전소 복귀')">충전소 복귀</button>
+        <button class="ctrl-btn blue"   onclick="forceCtrl('return_to_standby','대기장소 복귀')" style="grid-column: span 2">대기장소 복귀</button>
+      </div>
+      <button class="modal-close" onclick="closeForceCtrl()">닫기</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const POI_ID = parseInt("{{POI_ID}}");
+    const POI_NAME = "{{POI_NAME}}";
+    const SLOT_NUMBER = parseInt("{{SLOT_NUMBER}}");
+    const SLOT_ALIAS = "{{SLOT_ALIAS}}";
+    const MODE = "{{MODE}}";  // "slot" (메인) | "poi" (POI 직접) | "robot" (레거시)
+    const NEEDS_CONFIG = (MODE === "slot" && POI_ID === 0);
+
+    let state = null;
+    let polling = null;
+
+    async function api(path, opts = {}) {
+      const res = await fetch(path, {
+        headers: { "Content-Type": "application/json" },
+        ...opts,
+      });
+      if (!res.ok) {
+        let msg = res.statusText;
+        try { const j = await res.json(); msg = j.detail || j.message || msg; } catch {}
+        throw new Error(msg);
+      }
+      if (res.status === 204) return null;
+      return res.json();
+    }
+
+    function toast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg;
+      el.classList.add("show");
+      setTimeout(() => el.classList.remove("show"), 2500);
+    }
+
+    // ── 자체 confirm 모달 (Promise) ─────────────────────
+    function confirmModal(msg, opts = {}) {
+      const { title = "확인", okText = "확인", cancelText = "취소", danger = true } = opts;
+      return new Promise(resolve => {
+        document.getElementById("confirm-title").textContent = title;
+        document.getElementById("confirm-msg").textContent = msg;
+        const okBtn = document.getElementById("confirm-ok");
+        const cancelBtn = document.getElementById("confirm-cancel");
+        okBtn.textContent = okText;
+        cancelBtn.textContent = cancelText;
+        okBtn.className = danger ? "btn btn-danger" : "btn btn-primary";
+        okBtn.style.flex = "1";
+        okBtn.style.padding = "14px";
+
+        const modal = document.getElementById("confirm-modal");
+        modal.classList.add("show");
+
+        const cleanup = (result) => {
+          modal.classList.remove("show");
+          okBtn.removeEventListener("click", onOk);
+          cancelBtn.removeEventListener("click", onCancel);
+          resolve(result);
+        };
+        const onOk = () => cleanup(true);
+        const onCancel = () => cleanup(false);
+        okBtn.addEventListener("click", onOk);
+        cancelBtn.addEventListener("click", onCancel);
+      });
+    }
+
+    function stateLabel(s) {
+      const m = { empty: "비어있음", calling: "로봇 이동 중", arrived: "도착 — 대기 중", returning: "복귀 중" };
+      return m[s] || s;
+    }
+
+    async function refresh() {
+      if (NEEDS_CONFIG) return;  // 설정 모드에선 폴링 불필요
+      try {
+        state = await api(`/api/dispatch/poi/${POI_ID}/status`);
+        render();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    // ── 슬롯 설정 모달 ────────────────────────────────────
+    async function openConfig() {
+      const sel = document.getElementById("cfg-poi");
+      const slotInput = document.getElementById("cfg-slot");
+      const aliasInput = document.getElementById("cfg-alias");
+      slotInput.value = SLOT_NUMBER > 0 ? SLOT_NUMBER : "";
+      slotInput.disabled = SLOT_NUMBER > 0;  // 이미 URL에 슬롯 있으면 잠금
+      aliasInput.value = SLOT_ALIAS || "";
+      sel.innerHTML = '<option value="">불러오는 중...</option>';
+      try {
+        const pois = await api("/api/dispatch/slots/available-pois");
+        sel.innerHTML = '<option value="">-- POI 선택 --</option>' +
+          pois.map(p => `<option value="${p.id}" ${p.id === POI_ID ? "selected" : ""}>${p.name} (#${p.id})</option>`).join("");
+      } catch (e) {
+        sel.innerHTML = '<option value="">POI 목록 로드 실패</option>';
+      }
+      document.getElementById("config-modal").classList.add("show");
+    }
+
+    function closeConfig() {
+      document.getElementById("config-modal").classList.remove("show");
+    }
+
+    async function saveConfig() {
+      const slot = parseInt(document.getElementById("cfg-slot").value || "0");
+      const poiId = parseInt(document.getElementById("cfg-poi").value || "0");
+      const alias = document.getElementById("cfg-alias").value.trim();
+      if (!slot || slot < 1) { toast("슬롯 번호를 입력하세요"); return; }
+      if (!poiId) { toast("POI를 선택하세요"); return; }
+      try {
+        await api(`/api/dispatch/slots/${slot}`, {
+          method: "PUT",
+          body: JSON.stringify({ poi_id: poiId, alias: alias || null }),
+        });
+        toast("저장 완료 — 페이지 이동");
+        // 슬롯 URL로 리로드 → 운영 모드로 진입
+        location.href = `/api/dispatch/tablet/${slot}`;
+      } catch (e) {
+        toast("저장 실패: " + e.message);
+      }
+    }
+
+    function render() {
+      const badge = document.getElementById("badge");
+      const main = document.getElementById("main");
+      const forceBtn = document.getElementById("force-btn");
+      if (!state) return;
+
+      badge.textContent = stateLabel(state.state);
+      badge.className = "badge " + state.state;
+      // 강제 제어는 로봇 IP 있을 때만 활성 (calling/arrived 둘 다 가능)
+      forceBtn.disabled = !state.robot_ip;
+
+      if (state.state === "empty") {
+        renderEmpty(main);
+      } else if (state.state === "calling") {
+        renderCalling(main);
+      } else if (state.state === "arrived") {
+        renderArrived(main);
+      } else {
+        renderUnknown(main);
+      }
+    }
+
+    function renderEmpty(main) {
+      const canCall = state.available_robot_count > 0;
+      if (!canCall) {
+        main.innerHTML = `
+          <div class="call-container">
+            <div class="call-info">
+              현재 위치 <b>${state.poi_name}</b><br/>
+              가용 로봇: <b>0대</b>
+            </div>
+            <button class="call-btn" disabled>가용 로봇 없음</button>
+          </div>
+        `;
+        return;
+      }
+      main.innerHTML = `
+        <div class="call-container">
+          <div class="call-info">
+            현재 위치 <b>${state.poi_name}</b><br/>
+            가용 로봇: <b>${state.available_robot_count}대</b>
+          </div>
+          <div class="call-btn-row">
+            <button class="call-btn call-btn--rack" id="call-with-rack">
+              <span class="big">🟦 로봇 호출</span>
+              <span class="small">렉 포함 (standby에서 렉 픽업 후 이동)</span>
+            </button>
+            <button class="call-btn call-btn--norack" id="call-no-rack">
+              <span class="big">⬜ 로봇 호출</span>
+              <span class="small">렉 없이 (잭 조작 없이 바로 이동)</span>
+            </button>
+          </div>
+        </div>
+      `;
+      document.getElementById("call-with-rack").onclick = () => onCall(true);
+      document.getElementById("call-no-rack").onclick = () => onCall(false);
+    }
+
+    function renderCalling(main) {
+      main.innerHTML = `
+        <div class="robot-info">
+          <div>
+            <div class="name">${state.robot_name || "-"}</div>
+            <div class="meta">이 위치로 이동 중 · ${state.session_status || "-"}</div>
+          </div>
+          <div class="battery">${state.robot_battery != null ? state.robot_battery + "%" : "-"}</div>
+        </div>
+        <div class="panel" style="flex:1; display:flex; align-items:center; justify-content:center">
+          <div style="text-align:center; color:#8a93a6; font-size:18px">
+            로봇이 도착할 때까지 잠시 기다려주세요...
+          </div>
+        </div>
+      `;
+    }
+
+    function renderArrived(main) {
+      const occupied = new Set(state.occupied_poi_ids || []);
+      const pois = state.available_pois || [];
+      const grid = pois.map(p => {
+        const isOcc = occupied.has(p.id);
+        const cls = "poi-btn" + (isOcc ? " occupied" : "");
+        const dis = isOcc ? "disabled" : "";
+        return `<button class="${cls}" ${dis} data-id="${p.id}" data-name="${p.name}">${p.name}</button>`;
+      }).join("");
+
+      const withRack = state.with_rack !== false;
+      const modeLabel = withRack ? "렉 운반 중" : "렉 없이 모드";
+      const endLabel = withRack
+        ? "작업 종료 (랙 반납 + 충전소 복귀)"
+        : "작업 종료 (충전소 복귀)";
+      main.innerHTML = `
+        <div class="robot-info">
+          <div>
+            <div class="name">${state.robot_name || "-"}</div>
+            <div class="meta">${state.poi_name} 도착 · ${modeLabel}</div>
+          </div>
+          <div class="battery">${state.robot_battery != null ? state.robot_battery + "%" : "-"}</div>
+        </div>
+        <div class="panel" style="flex:1; display:flex; flex-direction:column">
+          <h2>다음 작업 위치 선택 (점유된 곳 제외)</h2>
+          <div class="grid">
+            ${grid || '<div class="empty-state">사용 가능한 위치 없음</div>'}
+          </div>
+          <div class="action-row">
+            <button class="btn btn-danger" id="end-btn">${endLabel}</button>
+          </div>
+        </div>
+      `;
+      main.querySelectorAll(".poi-btn:not(.occupied)").forEach(b => {
+        b.onclick = () => onNext(parseInt(b.dataset.id), b.dataset.name);
+      });
+      document.getElementById("end-btn").onclick = onEnd;
+    }
+
+    function renderUnknown(main) {
+      main.innerHTML = `<div class="panel" style="text-align:center; color:#8a93a6">상태: ${state.state}</div>`;
+    }
+
+    async function onCall(withRack) {
+      try {
+        const r = await api(`/api/dispatch/poi/${POI_ID}/call`, {
+          method: "POST",
+          body: JSON.stringify({ with_rack: !!withRack }),
+        });
+        const mode = withRack ? "렉 포함" : "렉 없이";
+        toast(`${r.robot_name || "로봇"} 호출 (${mode}) — 곧 도착합니다`);
+        await refresh();
+      } catch (e) {
+        toast("호출 실패: " + e.message);
+      }
+    }
+
+    async function onNext(nextId, name) {
+      try {
+        await api(`/api/dispatch/poi/${POI_ID}/next`, {
+          method: "POST",
+          body: JSON.stringify({ next_poi_id: nextId }),
+        });
+        toast(`${name} 으로 보냄`);
+        await refresh();
+      } catch (e) {
+        toast("실패: " + e.message);
+      }
+    }
+
+    async function onEnd() {
+      const withRack = state && state.with_rack !== false;
+      const msg = withRack
+        ? "작업을 종료하고 렉을 대기장소에 반납한 뒤 충전소로 복귀합니다. 계속할까요?"
+        : "작업을 종료하고 충전소로 복귀합니다. 계속할까요?";
+      const ok = await confirmModal(msg, { title: "작업 종료 확인", okText: "종료", cancelText: "취소" });
+      if (!ok) return;
+      try {
+        await api(`/api/dispatch/poi/${POI_ID}/end`, { method: "POST" });
+        toast("복귀 시작");
+        await refresh();
+      } catch (e) {
+        toast("실패: " + e.message);
+      }
+    }
+
+    // ── 강제 제어 (자동 동작 멈췄을 때) ──────────────────────
+    function openForceCtrl() {
+      if (!state || !state.robot_ip) {
+        toast("이 위치에 로봇이 없습니다");
+        return;
+      }
+      document.getElementById("force-desc").textContent =
+        `${state.robot_name || "로봇"} (${state.robot_ip}) 에 직접 명령합니다.`;
+      document.getElementById("force-modal").classList.add("show");
+    }
+
+    function closeForceCtrl() {
+      document.getElementById("force-modal").classList.remove("show");
+    }
+
+    async function forceCtrl(action, label) {
+      if (!state || !state.robot_ip) return;
+      const ip = state.robot_ip;
+      const map = {
+        jack_up:           `/api/robots/remote/jack/${ip}/jack_up`,
+        jack_down:         `/api/robots/remote/jack/${ip}/jack_down`,
+        cancel_move:       `/api/robots/remote/cancel-move/${ip}`,
+        dock:              `/api/robots/remote/dock/${ip}`,
+        return_to_standby: `/api/robots/remote/return-to-standby/${ip}`,
+      };
+      const url = map[action];
+      if (!url) return;
+      try {
+        const res = await fetch(url, { method: "POST" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        toast(`${label} 명령 전송`);
+        closeForceCtrl();
+        await refresh();
+      } catch (e) {
+        toast(`${label} 실패: ${e.message}`);
+      }
+    }
+
+    // 진입 분기
+    if (MODE === "robot") {
+      document.body.innerHTML = `
+        <div style="padding:40px; text-align:center; color:#8a93a6">
+          <h2 style="color:#f0f3fa">레거시 모드</h2>
+          <p>이 페이지는 더 이상 사용되지 않습니다.</p>
+          <p>슬롯 URL <code>/api/dispatch/tablet/{슬롯번호}</code> 로 접속하세요.</p>
+        </div>
+      `;
+    } else if (NEEDS_CONFIG) {
+      // 슬롯에 POI 매핑 없음 — 설정 안내 + 모달 자동 오픈
+      document.getElementById("main").innerHTML = `
+        <div class="call-container">
+          <div class="call-info">
+            <b>슬롯 ${SLOT_NUMBER}</b>에 작업 위치가 아직 지정되지 않았습니다.<br/>
+            우상단 <b>⚙</b> 또는 아래 버튼으로 설정하세요.
+          </div>
+          <button class="call-btn" onclick="openConfig()">슬롯 설정</button>
+        </div>
+      `;
+      document.getElementById("badge").textContent = "설정 필요";
+      document.getElementById("badge").className = "badge";
+      // 설정 모드에선 강제 제어 버튼 숨김
+      document.getElementById("force-btn").classList.add("hidden");
+      openConfig();
+    } else {
+      refresh();
+      polling = setInterval(refresh, 2000);
+    }
+  </script>
+</body>
+</html>

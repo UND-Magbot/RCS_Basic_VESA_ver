@@ -149,7 +149,7 @@ body {
 <!-- 헤더 -->
 <div class="header">
   <div>
-    <div class="header__title">UND RCS</div>
+    <div class="header__title" id="systemNameLabel">UND RCS</div>
     <div class="header__robot">{{ROBOT_NAME}}</div>
   </div>
   <div class="header__right">
@@ -201,13 +201,19 @@ body {
   <!-- 수동 배차 -->
   <div class="card">
     <div class="card__title">수동 배차</div>
+    <div class="form-row" style="margin-bottom:8px;">
+      <div class="form-col" style="flex:1;">
+        <label>작업 종류</label>
+        <select id="workModeSelect" onchange="onWorkModeChange()"></select>
+      </div>
+    </div>
     <div class="form-row">
       <div class="form-col">
-        <label>픽업</label>
+        <label id="pickupLabel">픽업</label>
         <select id="pickupSelect">{{POI_OPTIONS}}</select>
       </div>
       <div class="form-col">
-        <label>드롭오프</label>
+        <label id="dropoffLabel">드롭오프</label>
         <select id="dropoffSelect">{{POI_OPTIONS}}</select>
       </div>
     </div>
@@ -287,6 +293,49 @@ body {
 const API = window.location.origin;
 const ROBOT_ID = {{ROBOT_ID}};
 const ROBOT_IP = "{{ROBOT_IP}}";
+const ROBOT_TYPE = "{{ROBOT_TYPE}}";
+
+/* ── 작업 종류 (RCS 의 WORK_MODE_LABELS / ROBOT_TYPE_WORK_MODES 와 동기화) ── */
+const WORK_MODE_LABELS = {
+  rack_pickup: '랙 픽업 (W1 → 배달 → 복귀)',
+  delivery_no_rack: '배달 (랙 없이)',
+  simple_move: '단순 이동',
+};
+const ROBOT_TYPE_WORK_MODES = {
+  lifting: ['rack_pickup', 'delivery_no_rack', 'simple_move'],
+  serving: ['simple_move'],
+};
+function initWorkModeSelect() {
+  const sel = document.getElementById('workModeSelect');
+  if (!sel) return;
+  const modes = ROBOT_TYPE_WORK_MODES[ROBOT_TYPE] || ['simple_move'];
+  sel.innerHTML = modes.map(function(m) {
+    return '<option value="'+m+'">'+(WORK_MODE_LABELS[m] || m)+'</option>';
+  }).join('');
+  onWorkModeChange();
+}
+function onWorkModeChange() {
+  const sel = document.getElementById('workModeSelect');
+  const isSimple = sel && sel.value === 'simple_move';
+  const pLbl = document.getElementById('pickupLabel');
+  const dLbl = document.getElementById('dropoffLabel');
+  if (pLbl) pLbl.textContent = isSimple ? '시작 위치' : '픽업';
+  if (dLbl) dLbl.textContent = isSimple ? '도착 위치' : '드롭오프';
+}
+initWorkModeSelect();
+
+/* ── 시스템 이름 동기화 (RCS 설정에서 바꾸면 60초 내 반영) ── */
+async function refreshSystemName() {
+  try {
+    const r = await fetch(API + '/api/settings/system-name', {cache: 'no-store'});
+    if (!r.ok) return;
+    const d = await r.json();
+    const el = document.getElementById('systemNameLabel');
+    if (el && d && d.system_name) el.textContent = d.system_name;
+  } catch (_) {}
+}
+refreshSystemName();
+setInterval(refreshSystemName, 60000);
 
 /* ── 유틸 ── */
 function toast(msg, ms) {
@@ -304,16 +353,28 @@ function closeModal(id) {
 async function startTask() {
   const pickup = document.getElementById('pickupSelect').value;
   const dropoff = document.getElementById('dropoffSelect').value;
+  const workMode = (document.getElementById('workModeSelect') || {}).value || 'rack_pickup';
   if (!pickup || !dropoff) return;
   document.getElementById('startBtn').disabled = true;
   try {
     const res = await fetch(API+'/api/tasks/manual-run-pois', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({robot_id:ROBOT_ID, pickup_poi_id:+pickup, dropoff_poi_id:+dropoff, manual_confirm:true})
+      body: JSON.stringify({
+        robot_id: ROBOT_ID,
+        work_mode: workMode,
+        pickup_poi_id: +pickup,
+        dropoff_poi_id: +dropoff,
+        manual_confirm: true,
+      })
     });
-    if (res.ok) toast('작업을 시작합니다');
+    if (res.ok) toast('작업을 시작합니다 ('+(WORK_MODE_LABELS[workMode]||workMode)+')');
     else if (res.status===409) { toast('로봇이 이미 작업 중입니다',4000); document.getElementById('startBtn').disabled=false; }
-    else { toast('시작 실패',4000); document.getElementById('startBtn').disabled=false; }
+    else {
+      let msg = '시작 실패';
+      try { const d = await res.json(); if (d && d.detail) msg = d.detail; } catch(_) {}
+      toast(msg, 4000);
+      document.getElementById('startBtn').disabled = false;
+    }
   } catch(e) { toast('연결 오류',4000); document.getElementById('startBtn').disabled=false; }
 }
 async function stopTask() {

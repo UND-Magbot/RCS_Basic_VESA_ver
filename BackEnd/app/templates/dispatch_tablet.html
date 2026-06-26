@@ -300,6 +300,80 @@
     .action-row {
       margin-right: 140px;  /* 강제 제어 버튼 폭 만큼 비움 */
     }
+
+    /* 풀스크린 성공 알림 (다음 위치 보낸 후) */
+    .sent-overlay {
+      position: fixed; inset: 0;
+      background: rgba(15, 30, 30, 0.92);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    .sent-overlay.show { opacity: 1; }
+    .sent-icon {
+      width: 110px; height: 110px;
+      border-radius: 50%;
+      background: #1e553a;
+      border: 4px solid #34c977;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 60px;
+      color: #fff;
+      animation: sent-pop 0.35s ease-out;
+    }
+    .sent-msg-main {
+      font-size: 32px;
+      font-weight: 800;
+      color: #f0f3fa;
+      text-align: center;
+    }
+    .sent-msg-sub {
+      font-size: 16px;
+      color: #8a93a6;
+      text-align: center;
+    }
+    @keyframes sent-pop {
+      0%   { transform: scale(0.5); opacity: 0; }
+      60%  { transform: scale(1.12); opacity: 1; }
+      100% { transform: scale(1); }
+    }
+    .sent-icon.spinning {
+      animation: sent-pulse 1.2s ease-in-out infinite;
+      background: #1e3a5a;
+      border-color: #4a8aff;
+      color: transparent;       /* 안에 들어간 글자는 숨김 */
+      position: relative;
+      overflow: hidden;          /* 깔끔하게 박스 안에서만 */
+    }
+    .sent-icon.spinning::after {
+      content: '';
+      position: absolute;
+      top: 50%; left: 50%;
+      width: 64px; height: 64px;
+      margin: -32px 0 0 -32px;   /* 정확히 박스 중앙 */
+      border: 6px solid rgba(74, 138, 255, 0.18);
+      border-top-color: #4a8aff;
+      border-right-color: #4a8aff;
+      border-radius: 50%;
+      animation: sent-spin 0.9s linear infinite;
+      box-sizing: border-box;
+    }
+    @keyframes sent-pulse {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(74, 138, 255, 0.5);
+      }
+      50% {
+        box-shadow: 0 0 0 16px rgba(74, 138, 255, 0);
+      }
+    }
+    @keyframes sent-spin {
+      to { transform: rotate(360deg); }
+    }
   </style>
 </head>
 <body>
@@ -313,6 +387,13 @@
 
   <!-- 하단 왼쪽 강제 제어 (운영 모드에서만 표시) -->
   <button class="force-btn-fixed" id="force-btn" onclick="openForceCtrl()" disabled>강제 제어</button>
+
+  <!-- 다음 위치 보낸 후 성공 알림 풀스크린 -->
+  <div class="sent-overlay" id="sent-overlay">
+    <div class="sent-icon" id="sent-icon-circle">↑</div>
+    <div class="sent-msg-main" id="sent-msg-main"></div>
+    <div class="sent-msg-sub" id="sent-msg-sub"></div>
+  </div>
 
   <main id="main"></main>
 
@@ -504,6 +585,18 @@
       // 강제 제어는 로봇 IP 있을 때만 활성 (calling/arrived 둘 다 가능)
       forceBtn.disabled = !state.robot_ip;
 
+      // 다음 위치 보낸 후 — 잭업 끝나고 백엔드가 status="moving"으로 전환된 시점 감지
+      // (이 위치 입장에서는 prev POI인 자신이 더 이상 arrived가 아니게 됨 → state=empty 또는 다른 세션)
+      if (waitingForDeparture) {
+        // 잭업 동안: state="arrived", session_status="awaiting_next" 유지
+        // 잭업 끝나면: status="moving" + target NOT NULL → arrived/heading 둘 다 X → state="empty"
+        const isDeparted = state.state !== "arrived"
+                       || (state.session_status && state.session_status !== "awaiting_next");
+        if (isDeparted) {
+          showDepartureDone();
+        }
+      }
+
       if (state.state === "empty") {
         renderEmpty(main);
       } else if (state.state === "calling") {
@@ -625,17 +718,54 @@
       }
     }
 
+    // 다음 위치 보낸 후 — 백엔드의 잭업/출발 상태 추적
+    let waitingForDeparture = null;  // { name, robotName } | null
+
     async function onNext(nextId, name) {
       try {
         await api(`/api/dispatch/poi/${POI_ID}/next`, {
           method: "POST",
           body: JSON.stringify({ next_poi_id: nextId }),
         });
-        toast(`${name} 으로 보냄`);
-        await refresh();
+        // 1단계: "잭 업 준비 중" 표시 (백엔드가 잭업 진행 — 약 10초)
+        const overlay = document.getElementById("sent-overlay");
+        const robotName = (state && state.robot_name) || "로봇";
+        document.getElementById("sent-msg-main").textContent = `${name} 으로 출발 준비 중`;
+        document.getElementById("sent-msg-sub").textContent =
+          `잭 업 진행 중 — 잭이 올라간 뒤 출발합니다`;
+        const iconEl = document.getElementById("sent-icon-circle");
+        iconEl.textContent = "⟳";
+        iconEl.classList.add("spinning");
+        overlay.classList.add("show");
+
+        waitingForDeparture = { name, robotName };
+
+        // 8초간 "준비 중" 표시 → 그 후 ✓ "출발" 메시지로 전환 (백엔드 JACK_SETTLE_SEC와 동일)
+        setTimeout(() => {
+          if (waitingForDeparture) {
+            showDepartureDone();
+          }
+        }, 8000);
       } catch (e) {
         toast("실패: " + e.message);
       }
+    }
+
+    // 사용 안 함 — "준비 중" 화면은 3초 setTimeout으로 자동 닫힘
+    function showDepartureDone() {
+      if (!waitingForDeparture) return;
+      const { name, robotName } = waitingForDeparture;
+      waitingForDeparture = null;
+      document.getElementById("sent-msg-main").textContent = `${name} 으로 출발`;
+      document.getElementById("sent-msg-sub").textContent =
+        `${robotName}이 ${name}으로 이동을 시작했습니다`;
+      const iconEl = document.getElementById("sent-icon-circle");
+      iconEl.classList.remove("spinning");
+      iconEl.textContent = "✓";
+      // 2초 후 자동 닫기
+      setTimeout(() => {
+        document.getElementById("sent-overlay").classList.remove("show");
+      }, 2000);
     }
 
     async function onEnd() {

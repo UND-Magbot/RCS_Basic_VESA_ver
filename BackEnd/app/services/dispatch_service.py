@@ -31,7 +31,7 @@ from app.services.thread_utils import safe_thread
 logger = logging.getLogger(__name__)
 
 # 잭 업/다운 후 안정화 대기 (jack_service의 JACK_WAIT_SEC와 동일 기준)
-JACK_SETTLE_SEC = 10
+JACK_SETTLE_SEC = 8
 
 
 @dataclass
@@ -332,12 +332,14 @@ def _worker_loop(worker: _Worker, *, skip_pickup: bool = False) -> None:
                 _set_db_status(worker.session_id, "failed", error="첫 POI 이동 실패")
                 return
             _set_current_poi(worker.session_id, first_target_id)
-            # 도착 후 잭 다운 (작업자 작업 대기)
+            # 도착 표시 즉시 업데이트 (잭다운 sleep 동안 태블릿이 calling→arrived 빠르게 전환)
+            _set_db_status(worker.session_id, "awaiting_next")
+            # 도착 후 잭 다운 (실제 잭다운 + 안정화 대기)
             _jack_down_step(worker, label=f"잭 다운 — {poi['name']} 작업 대기")
 
         # 3) 메인 루프 — awaiting_next ↔ moving
         while True:
-            _set_db_status(worker.session_id, "awaiting_next")
+            # 이미 awaiting_next로 설정됨 (첫 도착 후 또는 다음 POI 도착 후)
             jack_service.update_job_status(worker.robot_ip, message="다음 명령 대기 중")
 
             # 다음 명령 대기 (timeout 없음 — 사람이 누를 때까지)
@@ -359,16 +361,19 @@ def _worker_loop(worker: _Worker, *, skip_pickup: bool = False) -> None:
                 continue
 
             _set_target_poi(worker.session_id, next_id)
-            _set_db_status(worker.session_id, "moving")
-            # 출발 전 잭 업 (들고 가기) — with_rack=True만
+            # 출발 전 잭 업 (들고 가기) — 잭업 동안은 status="awaiting_next" 유지
             _jack_up_step(worker, label=f"잭 업 — {poi['name']} 이동 준비")
+            # 잭업 끝난 후 실제 이동 시작 — 이 시점이 "출발" 시점
+            _set_db_status(worker.session_id, "moving")
             ok = _move_to_poi(worker, poi)
             if not ok:
                 logger.warning(f"[dispatch] {poi['name']} 이동 실패 — 대기 상태로 복귀")
                 _set_db_status(worker.session_id, "awaiting_next", error=f"{poi['name']} 이동 실패")
                 continue
             _set_current_poi(worker.session_id, next_id)
-            # 도착 후 잭 다운 (작업자 작업 대기) — with_rack=True만
+            # 도착 표시 즉시 업데이트 (잭다운 sleep 동안 태블릿이 빠르게 arrived로 전환)
+            _set_db_status(worker.session_id, "awaiting_next")
+            # 도착 후 잭 다운 (실제 잭다운 + 안정화 대기)
             _jack_down_step(worker, label=f"잭 다운 — {poi['name']} 작업 대기")
 
         # 4) 종료 시퀀스

@@ -45,6 +45,9 @@ class _Worker:
     next_event: threading.Event = field(default_factory=threading.Event)
     end_flag: bool = False
     pending_next_poi_id: Optional[int] = None  # 외부에서 set, 워커가 소비
+    # 마지막 실패의 구체 코드/키 (로봇 int fail_reason 또는 내부 문자열 키).
+    # _worker_loop 가 failed 로 마감할 때 세션 last_error 에 문자열로 저장 → 안내 카드용.
+    last_fail_key: Optional[object] = None
 
 
 # 워커 레지스트리 — robot_id 기준
@@ -164,16 +167,24 @@ def _pickup_at_standby(worker: _Worker) -> bool:
     standby = jack_service._get_standby_poi(area_id=worker.area_id, robot_ip=worker.robot_ip)
     if not standby:
         logger.error(f"[dispatch] robot_id={worker.robot_id} standby POI 조회 실패")
+        worker.last_fail_key = "STANDBY_MISSING"
         return False
 
     jack_service.update_job_status(worker.robot_ip, message="대기장소로 이동 (랙 정렬)")
+    # 픽업(정렬) 실패는 대개 지속성(잭 업 506 / 렉 없음 501 / 위치추정 3)이라
+    # 200회 재시도(~17분)해도 안 풀린다 → max_attempts=2로 "빨리 실패"시켜
+    # 실패 안내 카드가 ~10초 안에 뜨게 한다. (일반 주행 이동 standard는 재시도 유지)
     result = jack_service.safe_move(
         worker.robot_ip,
         "align_with_rack",
         standby["x"], standby["y"], standby["ori"],
+        max_attempts=2,
     )
     if str(result.get("state", "")).lower() != "succeeded":
         logger.error(f"[dispatch] align_with_rack 실패: {result}")
+        # 로봇이 준 구체 실패코드(506/501 등)를 잡아 안내에 활용
+        fr = result.get("fail_reason")
+        worker.last_fail_key = fr if fr is not None else "PICKUP_FAILED"
         return False
 
     jack_service.update_job_status(worker.robot_ip, message="잭 업 진행 중")
@@ -181,6 +192,7 @@ def _pickup_at_standby(worker: _Worker) -> bool:
         jack_service.jack_up(worker.robot_ip)
     except Exception as e:
         logger.error(f"[dispatch] jack_up 실패: {e}")
+        worker.last_fail_key = "PICKUP_FAILED"
         return False
     time.sleep(JACK_SETTLE_SEC)
     return True
@@ -194,7 +206,13 @@ def _move_to_poi(worker: _Worker, poi: dict) -> bool:
         "standard",
         poi["x"], poi["y"], poi["ori"],
     )
-    return str(result.get("state", "")).lower() == "succeeded"
+    ok = str(result.get("state", "")).lower() == "succeeded"
+    if not ok:
+        # 이동 실패 시 로봇이 준 구체 실패코드(9/101 등)를 저장 → 안내에 활용
+        fr = result.get("fail_reason")
+        if fr is not None:
+            worker.last_fail_key = fr
+    return ok
 
 
 def _jack_up_step(worker: _Worker, label: str = "잭 업") -> None:
@@ -308,9 +326,12 @@ def _worker_loop(worker: _Worker, *, skip_pickup: bool = False) -> None:
             if worker.with_rack:
                 # with_rack=True : standby에서 align_with_rack + jack_up
                 _set_db_status(worker.session_id, "picking_up")
+                worker.last_fail_key = None
                 ok = _pickup_at_standby(worker)
                 if not ok:
-                    _set_db_status(worker.session_id, "failed", error="픽업 실패")
+                    # last_error 에 "키"(예: "506"/"STANDBY_MISSING")를 저장 → 태블릿 안내 카드용
+                    _set_db_status(worker.session_id, "failed",
+                                   error=str(worker.last_fail_key or "PICKUP_FAILED"))
                     return
             else:
                 # with_rack=False : standby 안 거치고 잭만 올림 (안전한 이동을 위해)
@@ -320,16 +341,20 @@ def _worker_loop(worker: _Worker, *, skip_pickup: bool = False) -> None:
         # 2) 첫 POI 이동 — 재시작 복구일 땐 스킵 (이미 도착 가정)
         if not skip_pickup:
             if first_target_id is None:
-                _set_db_status(worker.session_id, "failed", error="first_poi_id 없음")
+                _set_db_status(worker.session_id, "failed", error="POI_NOT_FOUND")
                 return
             poi = _load_poi(first_target_id)
             if not poi:
-                _set_db_status(worker.session_id, "failed", error="first POI 조회 실패")
+                _set_db_status(worker.session_id, "failed", error="POI_NOT_FOUND")
                 return
             _set_db_status(worker.session_id, "moving")
+            worker.last_fail_key = None
             ok = _move_to_poi(worker, poi)
             if not ok:
-                _set_db_status(worker.session_id, "failed", error="첫 POI 이동 실패")
+                # 이동 실패코드(9/101 등)를 키로 저장, 없으면 GENERIC 유도용 기본 메시지
+                _set_db_status(worker.session_id, "failed",
+                               error=str(worker.last_fail_key) if worker.last_fail_key is not None
+                               else "첫 POI 이동 실패")
                 return
             _set_current_poi(worker.session_id, first_target_id)
             # 도착 표시 즉시 업데이트 (잭다운 sleep 동안 태블릿이 calling→arrived 빠르게 전환)
@@ -365,6 +390,7 @@ def _worker_loop(worker: _Worker, *, skip_pickup: bool = False) -> None:
             _jack_up_step(worker, label=f"잭 업 — {poi['name']} 이동 준비")
             # 잭업 끝난 후 실제 이동 시작 — 이 시점이 "출발" 시점
             _set_db_status(worker.session_id, "moving")
+            worker.last_fail_key = None
             ok = _move_to_poi(worker, poi)
             if not ok:
                 logger.warning(f"[dispatch] {poi['name']} 이동 실패 — 대기 상태로 복귀")
@@ -385,7 +411,9 @@ def _worker_loop(worker: _Worker, *, skip_pickup: bool = False) -> None:
 
     except Exception as e:
         logger.exception(f"[dispatch] 워커 예외 — robot_id={worker.robot_id}")
-        _set_db_status(worker.session_id, "failed", error=str(e))
+        # 구체 실패코드를 잡았으면 그걸 키로 저장(안내 카드용), 없으면 예외 메시지
+        _err = str(worker.last_fail_key) if worker.last_fail_key is not None else str(e)
+        _set_db_status(worker.session_id, "failed", error=_err)
     finally:
         jack_service._running_robot_id_by_ip.pop(worker.robot_ip, None)
         try:
@@ -582,15 +610,17 @@ def find_available_robot(area_id: Optional[int] = None) -> Optional[Robot]:
     # 배터리 내림차순, 동률이면 ID 오름차순
     candidates.sort(key=lambda x: (-x[0], x[1]))
 
-    # 라이브 ONLINE 체크 — 후보 IP만 모아 한 번에 병렬 조회
+    # 온라인 체크 — 백그라운드 캐시에서 즉시 조회 (요청 경로에서 실시간 네트워크 호출 제거)
+    #    기존엔 fetch_all_robots_live 동기 호출로 오프라인 후보 1대당 ~9초씩 매달렸음.
     try:
-        from app.robot_api.robot_live_service import fetch_all_robots_live
-        from app.routers.robot import DEFAULT_SECRET
-        cand_ips = [r.ip_address for _, _, r in candidates]
-        live = fetch_all_robots_live([{"ip": ip, "secret": DEFAULT_SECRET} for ip in cand_ips])
-        online_ips = {it.get("IP") for it in live.get("items", []) if it.get("ONLINE") == "Online"}
+        from app.services.robot_online_cache import get_online_ips, is_ready
+        if is_ready():
+            online_ips = get_online_ips()
+        else:
+            # 캐시 준비 전(부팅 직후)엔 후보 전부 통과 — 기존 폴백과 동일
+            online_ips = set(r.ip_address for _, _, r in candidates)
     except Exception as e:
-        logger.warning(f"[find_available_robot] 라이브 체크 실패(무시): {e}")
+        logger.warning(f"[find_available_robot] 온라인 캐시 조회 실패(무시): {e}")
         online_ips = set(r.ip_address for _, _, r in candidates)  # 폴백 — 모두 통과
 
     for battery, rid, robot in candidates:
@@ -634,21 +664,25 @@ def get_session_heading_to_poi(poi_id: int) -> Optional[DispatchSession]:
         db.close()
 
 
-def call_to_poi(poi_id: int, with_rack: bool = True) -> tuple[bool, str, Optional[int]]:
+def call_to_poi(poi_id: int, with_rack: bool = True) -> tuple[bool, Optional[str], Optional[int]]:
     """그 POI로 가용 로봇 1대 배정해서 호출.
 
     with_rack=True : standby에서 렉 픽업 → 그 POI로 이동
     with_rack=False: 잭 조작 없이 바로 그 POI로 이동
 
-    반환: (성공 여부, 메시지, 배정된 robot_id)
+    반환: (성공 여부, 실패키, 배정된 robot_id)
+      - 성공: (True, None, robot_id)
+      - 실패: (False, <failure_guide 키>, None)
+        키 예) "POI_OCCUPIED" / "POI_NOT_FOUND" / "NO_ROBOT"
+      실패키는 라우터에서 failure_guide.guide_for(키) 로 안내 카드 문구로 변환된다.
     """
     # 1) 점유 검증 — 다른 활성 세션이 그 POI를 current/target으로 들고 있으면 거부
     if get_session_at_poi(poi_id) or get_session_heading_to_poi(poi_id):
-        return False, "이미 다른 로봇이 점유 중인 위치입니다", None
+        return False, "POI_OCCUPIED", None
 
     poi = _load_poi(poi_id)
     if not poi:
-        return False, "POI 조회 실패", None
+        return False, "POI_NOT_FOUND", None
 
     # 2) 가용 로봇 선정 — 같은 area 우선
     db = SessionLocal()
@@ -669,9 +703,11 @@ def call_to_poi(poi_id: int, with_rack: bool = True) -> tuple[bool, str, Optiona
         # 같은 area 없으면 전체에서 한번 더 시도 (필요 시)
         robot = find_available_robot(area_id=None)
     if not robot:
-        return False, "가용 로봇이 없습니다 (작업 중 또는 오프라인)", None
+        return False, "NO_ROBOT", None
 
     ok, msg = start_session(robot.id, poi_id, with_rack=with_rack)
     if not ok:
-        return False, msg, None
-    return True, "ok", robot.id
+        # 선정 직후 경합으로 start 실패 — 첫 POI 조회 실패면 POI_NOT_FOUND, 그 외는 NO_ROBOT
+        key = "POI_NOT_FOUND" if "POI" in (msg or "") else "NO_ROBOT"
+        return False, key, None
+    return True, None, robot.id

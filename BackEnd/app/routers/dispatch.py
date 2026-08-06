@@ -29,6 +29,7 @@ from app.schemas.dispatch import (
 )
 from app.crud import dispatch as dispatch_crud
 from app.services import dispatch_service
+from app.services.failure_guide import guide_for
 from app.models.dispatch import DispatchSession as DispatchSessionModel
 from app.models.robot import Robot as RobotModel, RobotStatus
 
@@ -246,17 +247,17 @@ def _count_available_robots(db: Session) -> int:
     idle_robots = [r for r in robots if not dispatch_service.has_active_worker(r.id)]
     if not idle_robots:
         return 0
-    # 2) 라이브 ONLINE 체크 (배차 선정 로직과 동일)
+    # 2) 온라인 체크 — 백그라운드 캐시에서 즉시 조회 (요청 경로에서 실시간 네트워크 호출 제거)
+    #    기존엔 여기서 fetch_all_robots_live를 동기 호출해 오프라인 로봇 1대당 ~9초씩 매달렸음.
     try:
-        from app.robot_api.robot_live_service import fetch_all_robots_live
-        from app.routers.robot import DEFAULT_SECRET
-        live = fetch_all_robots_live([
-            {"ip": r.ip_address, "secret": DEFAULT_SECRET} for r in idle_robots
-        ])
-        online_ips = {it.get("IP") for it in live.get("items", []) if it.get("ONLINE") == "Online"}
+        from app.services.robot_online_cache import get_online_ips, is_ready
+        if not is_ready():
+            # 캐시가 아직 안 채워졌으면(부팅 직후 수 초) 낙관적 폴백 — 기존 except 폴백과 동일
+            return len(idle_robots)
+        online_ips = get_online_ips()
         return sum(1 for r in idle_robots if r.ip_address in online_ips)
     except Exception:
-        # 라이브 서비스 자체가 죽었으면 폴백 — 등록된 idle 수 그대로
+        # 캐시 조회 자체가 실패해도 폴백 — 등록된 idle 수 그대로
         return len(idle_robots)
 
 
@@ -326,6 +327,27 @@ def _poi_status(db: Session, poi_id: int) -> DispatchPOIStatusOut:
     occupied = sorted(dispatch_crud.occupied_poi_ids(db))
     available = [p for p in available if p.id != poi_id]
 
+    # 이 위치에서 호출했다가 최근(~60초) 비동기 실패한 세션 → 안내 카드 데이터
+    # 활성 세션(도착/이동 중)이 없을 때만 노출 (지금 오고 있으면 지난 실패로 방해하지 않음).
+    last_failure = None
+    if not session:
+        from sqlalchemy import text as _sql_text
+        recent_failed = (
+            db.query(DispatchSessionModel)
+            .filter(
+                DispatchSessionModel.first_poi_id == poi_id,
+                DispatchSessionModel.status == "failed",
+                # DB 시계 기준 60초 이내 (파이썬 utcnow 와의 타임존 불일치 회피)
+                DispatchSessionModel.updated_at >= _sql_text("NOW() - INTERVAL 60 SECOND"),
+            )
+            .order_by(DispatchSessionModel.id.desc())
+            .first()
+        )
+        if recent_failed:
+            last_failure = guide_for(recent_failed.last_error)
+            # 프론트 재팝업 방지용 서명 (세션별 1회만 표시)
+            last_failure["session_id"] = recent_failed.id
+
     return DispatchPOIStatusOut(
         poi_id=poi_id,
         poi_name=poi_name,
@@ -341,6 +363,7 @@ def _poi_status(db: Session, poi_id: int) -> DispatchPOIStatusOut:
         available_pois=available,
         occupied_poi_ids=occupied,
         available_robot_count=_count_available_robots(db),
+        last_failure=last_failure,
     )
 
 
@@ -358,32 +381,54 @@ def poi_call(poi_id: int, body: DispatchCallRequest | None = None, db: Session =
       False → 잭 조작 없이 바로 이 POI로 이동
     """
     with_rack = body.with_rack if body is not None else True
-    ok, msg, robot_id = dispatch_service.call_to_poi(poi_id, with_rack=with_rack)
+    ok, key, robot_id = dispatch_service.call_to_poi(poi_id, with_rack=with_rack)
+    if not ok:
+        # 실패 — 안내 카드용 guide 를 담아 200 으로 반환 (프론트가 ok=false 를 보고 카드 표시)
+        guide = guide_for(key)
+        return DispatchCallResult(ok=False, message=guide["why"], guide=guide)
     robot_name = None
-    if ok and robot_id:
+    if robot_id:
         r = db.query(Robot).filter(Robot.id == robot_id).first()
         robot_name = r.name if r else None
-    if not ok:
-        raise HTTPException(status_code=409, detail=msg)
     return DispatchCallResult(ok=True, message="ok", robot_id=robot_id, robot_name=robot_name)
+
+
+def _next_reject_key(msg: str) -> str:
+    """send_next 거부 메시지 → failure_guide 키."""
+    m = msg or ""
+    if "점유" in m:
+        return "NEXT_OCCUPIED"
+    if "종료" in m or "완료" in m or "활성 배차 없음" in m:
+        return "SESSION_GONE"
+    if "POI" in m:
+        return "POI_NOT_FOUND"
+    # "현재 상태(...)에서는 다음 명령을 받을 수 없습니다" 등
+    return "NOT_AWAITING"
 
 
 @router.post("/poi/{poi_id}/next")
 def poi_send_next(poi_id: int, body: DispatchNextRequest, db: Session = Depends(get_db)):
-    """이 위치에 도착한 로봇을 비어있는 다음 POI로 보냄."""
+    """이 위치에 도착한 로봇을 비어있는 다음 POI로 보냄.
+
+    실패 시 HTTP 200 + {ok:false, guide:{...}} 로 안내 카드 데이터를 반환한다
+    (프론트가 ok=false 를 보고 카드 표시).
+    """
     session = dispatch_service.get_session_at_poi(poi_id)
     if not session:
-        raise HTTPException(status_code=404, detail="이 위치에 대기 중인 로봇이 없습니다")
+        guide = guide_for("NOT_AWAITING")
+        return {"ok": False, "message": guide["why"], "guide": guide}
 
     # 점유 검증
     occupied = dispatch_crud.occupied_poi_ids(db)
     occupied.discard(poi_id)  # 자기 위치 (출발)
     if body.next_poi_id in occupied:
-        raise HTTPException(status_code=409, detail="다른 로봇이 점유 중인 위치입니다")
+        guide = guide_for("NEXT_OCCUPIED")
+        return {"ok": False, "message": guide["why"], "guide": guide}
 
     ok, msg = dispatch_service.send_next(session.robot_id, body.next_poi_id)
     if not ok:
-        raise HTTPException(status_code=409, detail=msg)
+        guide = guide_for(_next_reject_key(msg))
+        return {"ok": False, "message": guide["why"], "guide": guide}
     return {"ok": True, "robot_id": session.robot_id}
 
 

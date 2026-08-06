@@ -79,6 +79,9 @@ class DispatchPOIStatusOut(BaseModel):
     available_pois: list[POIBrief] = Field(default_factory=list)
     occupied_poi_ids: list[int] = Field(default_factory=list)
     available_robot_count: int = 0
+    # 최근(~60초) 이 위치 호출이 비동기 실패했을 때 안내 카드 데이터
+    # {"why","how","for_admin","code","session_id"} — 없으면 None
+    last_failure: Optional[dict] = None
 
 
 class DispatchCallResult(BaseModel):
@@ -86,6 +89,8 @@ class DispatchCallResult(BaseModel):
     message: str
     robot_id: Optional[int] = None
     robot_name: Optional[str] = None
+    # 호출 실패 시 안내 카드 데이터 {"why","how","for_admin","code"}
+    guide: Optional[dict] = None
 
 
 # ── 슬롯 ─────────────────────────────────────────

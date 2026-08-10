@@ -13,6 +13,10 @@
   guide_for("NO_ROBOT")     -> {..., "code":"NO_ROBOT"}
   guide_for("506")          -> 506 과 동일 (숫자 문자열은 int 로 정규화)
   guide_for(<미지의 키>)     -> GENERIC 폴백 (+ code=<원본키>)
+  guide_for(9, with_rack=True) -> 렉 적재 상황 전용 문구 (아래 FAILURE_GUIDE_WITH_RACK)
+
+렉 적재 여부에 따라 원인이 달라지는 코드가 있어서(대표: 9 경로계산 실패),
+그런 코드만 FAILURE_GUIDE_WITH_RACK 에 오버라이드로 둔다. 없으면 기본 표를 쓴다.
 """
 from typing import Union
 
@@ -63,6 +67,16 @@ FAILURE_GUIDE: dict = {
         "how": "다른 로봇이 작업을 마칠 때까지 기다렸다가 다시 호출하세요.",
         "for_admin": False,
     },
+    "QUEUED": {
+        "why": "지금은 로봇이 모두 작업 중이에요. 대기열에 등록했습니다.",
+        "how": "먼저 끝나는 로봇이 자동으로 옵니다. 다시 누르지 않아도 됩니다.",
+        "for_admin": False,
+    },
+    "ALREADY_QUEUED": {
+        "why": "이미 대기열에 등록돼 있어요.",
+        "how": "순서가 되면 자동으로 옵니다. 그대로 기다려 주세요.",
+        "for_admin": False,
+    },
     "POI_OCCUPIED": {
         "why": "이미 다른 로봇이 이 위치에 있거나 오고 있어요.",
         "how": "비어 있는 다른 위치를 쓰거나, 그 로봇이 떠난 뒤 호출하세요.",
@@ -101,6 +115,17 @@ FAILURE_GUIDE: dict = {
 }
 
 
+# ── 렉 적재(with_rack=True) 상황 전용 오버라이드 ─────────────
+# 같은 코드라도 렉을 실었을 때는 원인/조치가 달라지는 것만 여기에 둔다.
+FAILURE_GUIDE_WITH_RACK: dict = {
+    9: {
+        "why": "렉을 실은 상태로는 지나갈 공간이 부족해요.",
+        "how": "렉 놓는 자리 주변을 0.6m 이상 비우거나, 렉 위치를 여유 있는 곳으로 옮긴 뒤 다시 호출하세요.",
+        "for_admin": False,
+    },
+}
+
+
 def _normalize_key(key: Union[int, str, None]):
     """숫자 문자열은 int 로 정규화 (예: "506" -> 506). 그 외는 그대로."""
     if isinstance(key, str):
@@ -114,15 +139,22 @@ def _normalize_key(key: Union[int, str, None]):
     return key
 
 
-def guide_for(key: Union[int, str, None]) -> dict:
+def guide_for(key: Union[int, str, None], *, with_rack: bool = False) -> dict:
     """실패 키 -> 안내 dict.
 
     존재하면 해당 항목의 복사본 + {"code": 원본키} 반환.
     없으면 GENERIC 폴백의 복사본 + {"code": 원본키} 반환.
     (원본키를 그대로 code 로 돌려주어 화면에 "코드 506" 처럼 표시)
+
+    with_rack=True 이면 FAILURE_GUIDE_WITH_RACK 을 먼저 보고, 거기 없으면 기본 표를 쓴다.
+    (기본 False 라 기존 호출부는 수정 없이 그대로 동작)
     """
     lookup = _normalize_key(key)
-    entry = FAILURE_GUIDE.get(lookup)
+    entry = None
+    if with_rack:
+        entry = FAILURE_GUIDE_WITH_RACK.get(lookup)
+    if entry is None:
+        entry = FAILURE_GUIDE.get(lookup)
     if entry is None:
         out = dict(GENERIC)
     else:

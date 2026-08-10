@@ -79,6 +79,9 @@ class DispatchPOIStatusOut(BaseModel):
     available_pois: list[POIBrief] = Field(default_factory=list)
     occupied_poi_ids: list[int] = Field(default_factory=list)
     available_robot_count: int = 0
+    # 호출 대기열에 등록돼 있으면 순번(1부터), 아니면 None.
+    # 로봇이 모두 바쁠 때 호출하면 거부 대신 대기열에 들어간다(E1).
+    queued_position: Optional[int] = None
     # 최근(~60초) 이 위치 호출이 비동기 실패했을 때 안내 카드 데이터
     # {"why","how","for_admin","code","session_id"} — 없으면 None
     last_failure: Optional[dict] = None

@@ -1223,6 +1223,14 @@
   z-index: 1;
 }
 
+/* 맵 데이터 무수신 안내 (MAP_STALL_SEC 경과 시) */
+.mapping-modal__stall-hint {
+  max-width: 420px;
+  text-align: center;
+  line-height: 1.6;
+  color: #fbbf24;
+}
+
 /* ══════════════════════════════════════════
    POI Edit Panel (overlay modal)
    ══════════════════════════════════════════ */

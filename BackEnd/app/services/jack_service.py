@@ -472,6 +472,7 @@ SAFE_MOVE_DEFAULT_MAX_ATTEMPTS = 200
 def safe_move(ip: str, move_type: str, target_x: float, target_y: float,
               target_ori: float = 0, retry_delay: float = 5.0,
               max_attempts: int | None = None, timeout: int = MOVE_TIMEOUT,
+              stop_on_repeated_fail: int | None = None,
               **extra) -> dict:
     """create_move + wait_move 통합 + 자동 재시도.
 
@@ -482,11 +483,20 @@ def safe_move(ip: str, move_type: str, target_x: float, target_y: float,
       - 'succeeded' / 'cancelled' → 결과 반환
       - max_attempts=None 이면 SAFE_MOVE_DEFAULT_MAX_ATTEMPTS(200회 ≈ 17분) 까지 재시도.
         그 이상은 좌표 자체 오류 가능성 — 영원히 도는 것 방지.
+
+    stop_on_repeated_fail (기본 None = 기존 동작 그대로):
+      로봇이 준 같은 fail_reason 이 N회 "연속" 나오면 지속성 실패로 보고 즉시 반환.
+      예) 렉 적재 상태에서 9(calculation_failed) 가 계속 나오는 상황 — 200회(≈17분)를
+      다 돌아도 안 풀리므로 빨리 실패시켜 태블릿 안내 카드를 띄우기 위함.
+      사람이 잠깐 지나가서 생긴 단발 실패는 코드가 바뀌거나 성공하므로 영향 없음.
+      fail_reason 이 없는 실패(timeout 등)는 카운트를 리셋한다.
     """
     if max_attempts is None:
         max_attempts = SAFE_MOVE_DEFAULT_MAX_ATTEMPTS
     attempt = 0
     last_result: dict = {}
+    repeat_fail_reason: object = None   # 직전 실패의 fail_reason
+    repeat_count = 0                    # 그 코드가 연속으로 나온 횟수
     while True:
         _check_stop(ip)
         _wait_if_paused(ip)
@@ -534,6 +544,25 @@ def safe_move(ip: str, move_type: str, target_x: float, target_y: float,
         fail_msg = result.get("fail_message") or state or "unknown"
         logger.warning(f"[safe_move] {ip} 이동 미완료 (시도 {attempt}, state={state}): {fail_msg}")
         update_job_status(ip, message=f"이동 미완료 ({fail_msg}) — 재시도 중 ({attempt}회차)")
+
+        # 같은 실패코드 N회 연속 → 지속성 실패로 판단하고 조기 중단
+        if stop_on_repeated_fail:
+            fr = result.get("fail_reason")
+            if fr is None:
+                # timeout 등 코드 없는 실패 — 연속 판정 리셋
+                repeat_fail_reason, repeat_count = None, 0
+            elif fr == repeat_fail_reason:
+                repeat_count += 1
+            else:
+                repeat_fail_reason, repeat_count = fr, 1
+            if fr is not None and repeat_count >= stop_on_repeated_fail:
+                logger.error(
+                    f"[safe_move] {ip} 같은 실패코드({fr}) {repeat_count}회 연속 "
+                    f"— 지속성 실패로 판단, 재시도 중단 ({move_type})"
+                )
+                update_job_status(ip, message=f"이동 실패 (코드 {fr}) — 재시도 중단")
+                return last_result
+
         if max_attempts is not None and attempt >= max_attempts:
             return last_result
         _interruptible_sleep(ip, retry_delay)

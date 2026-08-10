@@ -344,7 +344,11 @@ def _poi_status(db: Session, poi_id: int) -> DispatchPOIStatusOut:
             .first()
         )
         if recent_failed:
-            last_failure = guide_for(recent_failed.last_error)
+            # 그 세션이 렉을 실은 채였는지에 따라 같은 코드도 문구가 달라진다(대표: 9)
+            last_failure = guide_for(
+                recent_failed.last_error,
+                with_rack=bool(recent_failed.with_rack),
+            )
             # 프론트 재팝업 방지용 서명 (세션별 1회만 표시)
             last_failure["session_id"] = recent_failed.id
 
@@ -363,6 +367,7 @@ def _poi_status(db: Session, poi_id: int) -> DispatchPOIStatusOut:
         available_pois=available,
         occupied_poi_ids=occupied,
         available_robot_count=_count_available_robots(db),
+        queued_position=dispatch_service.pending_position(poi_id),
         last_failure=last_failure,
     )
 
@@ -384,13 +389,24 @@ def poi_call(poi_id: int, body: DispatchCallRequest | None = None, db: Session =
     ok, key, robot_id = dispatch_service.call_to_poi(poi_id, with_rack=with_rack)
     if not ok:
         # 실패 — 안내 카드용 guide 를 담아 200 으로 반환 (프론트가 ok=false 를 보고 카드 표시)
-        guide = guide_for(key)
+        guide = guide_for(key, with_rack=with_rack)
         return DispatchCallResult(ok=False, message=guide["why"], guide=guide)
     robot_name = None
     if robot_id:
         r = db.query(Robot).filter(Robot.id == robot_id).first()
         robot_name = r.name if r else None
     return DispatchCallResult(ok=True, message="ok", robot_id=robot_id, robot_name=robot_name)
+
+
+@router.post("/poi/{poi_id}/cancel-queue")
+def poi_cancel_queue(poi_id: int):
+    """이 POI의 호출 대기열 등록을 취소.
+
+    로봇이 모두 바쁠 때 호출하면 대기열에 등록되는데(E1), 작업자가 취소할 수 있어야
+    잘못 누른 호출이 30분(PENDING_TTL_SEC) 동안 남아 있지 않는다.
+    """
+    cancelled = dispatch_service.cancel_pending(poi_id)
+    return {"ok": True, "cancelled": cancelled}
 
 
 def _next_reject_key(msg: str) -> str:

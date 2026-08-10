@@ -8,6 +8,10 @@ import { useAlert } from "@/lib/context/AlertContext";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
+// 맵 데이터가 이 시간 동안 한 번도 안 오면 "뭔가 잘못됐다"고 보고 안내 + 재시작 버튼을 띄운다.
+// (충전 도킹 중 맵핑처럼 로봇이 에러도 안 주고 조용히 실패하는 경우가 있음 — 미해결이슈 7번)
+const MAP_STALL_SEC = 15;
+
 function getWsUrl(httpUrl: string): string {
   return httpUrl.replace(/^http/, "ws");
 }
@@ -27,6 +31,7 @@ export function MappingModal({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [hasMapData, setHasMapData] = useState(false);
+  const [mapDataStalled, setMapDataStalled] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -57,6 +62,7 @@ export function MappingModal({
     if (!open) {
       closeWs();
       setHasMapData(false);
+      setMapDataStalled(false);
       mapMetaRef.current = null;
       baseImageRef.current = null;
       poseRef.current = null;
@@ -220,6 +226,16 @@ export function MappingModal({
     };
   }, [status, compositeRender]);
 
+  // 맵 데이터 무수신 감지 — MAP_STALL_SEC 동안 한 장도 못 받으면 안내 + 재시작 버튼
+  useEffect(() => {
+    if (status !== "mapping" || hasMapData) {
+      setMapDataStalled(false);
+      return;
+    }
+    const timer = setTimeout(() => setMapDataStalled(true), MAP_STALL_SEC * 1000);
+    return () => clearTimeout(timer);
+  }, [status, hasMapData]);
+
   // Also re-render on container resize
   useEffect(() => {
     if (status !== "mapping" && status !== "finished") return;
@@ -300,15 +316,23 @@ export function MappingModal({
       }
 
       if (msg.error) {
+        // 이전엔 console.error 만 찍어서 화면엔 아무 표시가 없었다 → 사용자에게도 보이게
         console.error("[WS] error:", msg.error);
+        setError(`맵핑 데이터 오류: ${String(msg.error)}`);
         return;
       }
 
       const topic = msg.topic as string | undefined;
 
       if (topic === "/map") {
-        // /map 토픽이 도착하면 이후 /maps/5cm/1hz는 영구 무시
-        has5cmTopicRef.current = true;
+        // ⚠️ 이 펌웨어는 맵핑 중(맵 미생성)에도 /map 을 빈 값(size [0,0], data 0바이트)으로
+        // 계속 발행한다. 예전처럼 "도착만 하면" 플래그를 세우면 /maps/5cm/1hz 폴백이
+        // 영구히 막혀 화면이 영원히 안 그려진다(미해결이슈 9번).
+        // → 실제 데이터가 들어있을 때만 잠근다.
+        const mapData = msg.data as string | undefined;
+        if (typeof mapData === "string" && mapData.length >= 10) {
+          has5cmTopicRef.current = true;
+        }
         handleMapTopic(msg);
       } else if (topic === "/maps/5cm/1hz" || topic === "/maps/1cm/1hz") {
         // /map이 아직 안 온 경우에만 /maps/5cm/1hz를 fallback으로 사용
@@ -361,9 +385,11 @@ export function MappingModal({
 
     setError(null);
     setHasMapData(false);
+    setMapDataStalled(false);
     poseRef.current = null;
     trajectoryRef.current = [];
     scanPointsRef.current = [];
+    has5cmTopicRef.current = false;
 
     try {
       // 기존 매핑 작업이 있으면 자동으로 취소
@@ -397,6 +423,13 @@ export function MappingModal({
         err instanceof Error ? err.message : "매핑 시작에 실패했습니다.";
       setError(message);
     }
+  };
+
+  // 맵 데이터 무수신 상태에서 사용자가 직접 다시 시도 —
+  // handleStart 가 앞에서 진행 중인 맵핑을 cancelled 로 정리하므로 그대로 재호출하면 된다.
+  const handleRestart = () => {
+    setMapDataStalled(false);
+    void handleStart();
   };
 
   // ── STOP ──
@@ -565,6 +598,24 @@ export function MappingModal({
                 <div className="mapping-modal__scan-ring mapping-modal__scan-ring--delay" />
               </div>
               <span>맵 데이터 수신 대기 중...</span>
+              {mapDataStalled && (
+                <>
+                  <span className="mapping-modal__stall-hint">
+                    {MAP_STALL_SEC}초 동안 맵 데이터가 오지 않았습니다.
+                    <br />
+                    로봇이 충전독에 도킹돼 있으면 맵이 생성되지 않습니다 — 충전기에서 분리한 뒤 다시 시작하세요.
+                    <br />
+                    잭이 내려가 있는지(progress 0.0), 로봇 경보가 없는지도 확인하세요.
+                  </span>
+                  <button
+                    className="mapping-modal__btn mapping-modal__btn--start"
+                    onClick={handleRestart}
+                    disabled={saving}
+                  >
+                    다시 시작
+                  </button>
+                </>
+              )}
             </div>
           )}
         </div>

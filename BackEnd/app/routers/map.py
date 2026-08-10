@@ -1862,7 +1862,28 @@ def api_get_mappings(robot_ip: str):
 
 @router.post("/{robot_ip}/mappings", status_code=201)
 def api_create_mapping(robot_ip: str, body: dict, db: Session = Depends(get_db)):
-    """맵핑 시작"""
+    """맵핑 시작.
+
+    ⚠️ 충전 도킹 중이면 로봇이 요청을 201 로 받아주고 state: running 까지 만들지만
+    실제 SLAM 이 돌지 않아 맵이 하나도 안 생긴다(2026-08-07 현장 실측, 미해결이슈 7번).
+    거부 코드도 알림도 안 오므로 화면은 "맵 데이터 수신 대기 중"에서 영원히 멈춘다.
+    → 로봇에 요청을 보내기 전에 충전 상태를 확인해 409 로 막고 안내한다.
+    """
+    from app.robot_api.robot_live_service import is_charging
+
+    # 판정 불가(None)면 막지 않는다 — 오탐으로 멀쩡한 맵핑을 막는 쪽이 더 나쁘다(fail-open)
+    try:
+        charging = is_charging(robot_ip)
+    except Exception as e:                      # 조회 자체 실패도 통과시킨다
+        logger.warning(f"[mapping] 충전 상태 확인 실패(무시하고 진행): {e}")
+        charging = None
+    if charging is True:
+        raise HTTPException(
+            status_code=409,
+            detail="로봇이 충전독에 도킹된 상태에서는 맵이 생성되지 않습니다. "
+                   "충전기에서 분리한 뒤 다시 시작하세요.",
+        )
+
     secret = _find_secret(robot_ip)
     result = _proxy(create_mapping, robot_ip, secret, body)
     robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()

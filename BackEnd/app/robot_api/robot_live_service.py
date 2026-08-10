@@ -50,6 +50,11 @@ def _collect_ws_topics(ip: str, topics: list[str], timeout_sec: int = WS_TIMEOUT
                     "/detailed_battery_state" in collected or "/battery_state" in collected
                 ):
                     break
+                # /planning_state 를 아예 요청하지 않은 호출(예: is_charging — 배터리만 필요)은
+                # 요청한 토픽이 하나라도 오면 더 기다릴 이유가 없다.
+                # (기존 호출부는 WS_TOPICS 에 /planning_state 가 있으므로 동작 불변)
+                if "/planning_state" not in topics:
+                    break
 
         return collected, None
     except (WebSocketException, OSError, json.JSONDecodeError) as exc:
@@ -150,6 +155,34 @@ def fetch_robot_live(ip: str, secret: str) -> dict:
         "POWER(%)": _to_power(battery.get("percentage"), online),
         "errors": errors,
     }
+
+
+def is_charging(ip: str, timeout_sec: int = 3) -> bool | None:
+    """로봇이 지금 충전(도킹) 중인지 — 배터리 토픽만 가볍게 확인.
+
+    반환:
+      True  — 확실히 충전 중 (power_supply_status = charging / full)
+      False — 확실히 충전 중 아님 (discharging / not_charging)
+      None  — 판정 불가 (오프라인, WS 실패, 필드 없음)
+
+    fetch_robot_live() 는 REST 2회(각 3초) + WS 4초라 최악 10초가 걸린다.
+    충전 여부만 필요한 호출부(맵핑 시작 가드 등)는 이 함수를 쓴다 — 최대 timeout_sec.
+
+    ⚠️ 호출부는 None 을 "차단"으로 해석하지 말 것. 판정 불가일 때 막으면
+    멀쩡한 작업이 막힌다 (fail-open 이 맞다).
+    """
+    ws_data, ws_error = _collect_ws_topics(
+        ip, ["/detailed_battery_state", "/battery_state"], timeout_sec=timeout_sec
+    )
+    if ws_error and not ws_data:
+        return None
+    battery = ws_data.get("/detailed_battery_state", {}) or ws_data.get("/battery_state", {})
+    status = str(battery.get("power_supply_status", "")).lower()
+    if status in {"charging", "full"}:
+        return True
+    if status in {"discharging", "not_charging"}:
+        return False
+    return None
 
 
 def fetch_all_robots_live(robots: list[dict]) -> dict:

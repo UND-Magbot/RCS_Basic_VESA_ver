@@ -713,24 +713,33 @@
     }
 
     function renderEmpty(main) {
-      const canCall = state.available_robot_count > 0;
-      if (!canCall) {
+      // 대기열에 등록된 상태 — 로봇이 나면 자동으로 온다. 다시 누를 필요 없음.
+      if (state.queued_position) {
         main.innerHTML = `
           <div class="call-container">
             <div class="call-info">
               현재 위치 <b>${state.poi_name}</b><br/>
-              가용 로봇: <b>0대</b>
+              대기열 <b>${state.queued_position}번째</b>
             </div>
-            <button class="call-btn" disabled>가용 로봇 없음</button>
+            <div class="call-info" style="opacity:.8">
+              로봇이 모두 작업 중이에요.<br/>
+              먼저 끝나는 로봇이 <b>자동으로</b> 옵니다 — 다시 누르지 않아도 됩니다.
+            </div>
+            <button class="call-btn" id="cancel-queue">대기 취소</button>
           </div>
         `;
+        document.getElementById("cancel-queue").onclick = onCancelQueue;
         return;
       }
+      // 가용 0대여도 호출 버튼을 막지 않는다 — 누르면 대기열에 등록된다(E1).
+      const cnt = state.available_robot_count;
       main.innerHTML = `
         <div class="call-container">
           <div class="call-info">
             현재 위치 <b>${state.poi_name}</b><br/>
-            가용 로봇: <b>${state.available_robot_count}대</b>
+            ${cnt > 0
+              ? `가용 로봇: <b>${cnt}대</b>`
+              : `가용 로봇: <b>0대</b> — 호출하면 <b>대기열</b>에 등록됩니다`}
           </div>
           <div class="call-btn-row">
             <button class="call-btn call-btn--rack" id="call-with-rack">
@@ -825,6 +834,17 @@
         await refresh();
       } catch (e) {
         // 네트워크/서버 오류 — 응답 자체를 못 받음
+        showNetworkErrorCard();
+      }
+    }
+
+    // 대기열 등록 취소 — 잘못 눌렀거나 더 이상 필요 없을 때
+    async function onCancelQueue() {
+      try {
+        await api(`/api/dispatch/poi/${POI_ID}/cancel-queue`, { method: "POST" });
+        toast("대기를 취소했습니다");
+        await refresh();
+      } catch (e) {
         showNetworkErrorCard();
       }
     }

@@ -50,9 +50,21 @@
 - `zone_guard.acquire_zones_for_move`, `poi_lock`은 기존 그대로 활용
 
 ### 로봇 자동 배정
-- 가용 로봇 = 활성 워커 없음 (=충전소 대기) + `is_active=True` + `ip_address` 있음
+- 가용 로봇 = 활성 워커 없음 (=충전소 대기) + `is_active=True` + `ip_address` 있음 + 온라인(백그라운드 캐시)
 - 우선순위: **`robot_status.battery_level` 내림차순 → robot_id 오름차순**
-- 가용 로봇 0대면 호출 거부 (태블릿에 "가용 로봇 없음")
+- **가용 로봇 0대면 대기열(FIFO)에 등록** → 먼저 끝난 워커가 자동 배정 (2026-08-10)
+- **배정 전 구간은 `_assign_lock`(RLock)으로 원자화** — 점유 검증 → 로봇 선정 → 세션 생성 → 워커 등록.
+  락 없이 두면 여러 태블릿 동시 호출 시 같은 로봇/같은 POI가 이중으로 잡힌다(E2/E3).
+  락 순서 규칙: `_assign_lock → _workers_lock` (역방향 금지)
+
+### 이동 타입 사용 규칙 (dispatch_service)
+| 단계 | 타입 | 비고 |
+|---|---|---|
+| 렉 픽업 | `align_with_rack` | 실패는 지속성이 많아 `max_attempts=2` 로 빨리 실패시킴 |
+| 작업 위치 이동 | `standard` | 같은 `fail_reason` 3연속이면 조기 중단(`stop_on_repeated_fail=3`) |
+| **렉 반납** | **`to_unload_point`** | `standard` 로 보내면 목표 근처에서 "도착" 처리돼 렉을 자리 앞에 내려놓는다(2026-08-10 실측 0.717m). 실패 시 `standard` 폴백 |
+| 충전소 사전 접근 | `standard` | `{충전소명}-1` POI(예 `C1-1`)가 있으면 그리로 먼저 |
+| 충전소 도킹 | `charge` | `charging_id` 가 NULL이면 이 블록 전체를 건너뛴다 |
 
 ## 디렉토리 구조
 - `BackEnd/` — FastAPI 백엔드
@@ -82,7 +94,8 @@
 | POST | `/poi/{poi_id}/call` | 그 POI로 가용 로봇 1대 호출 (배터리 1순위) |
 | POST | `/poi/{poi_id}/next` | body `{next_poi_id}` — 그 POI에 있는 로봇을 비어있는 POI로 보냄 |
 | POST | `/poi/{poi_id}/end` | 그 POI에 있는 로봇만 종료 (standby + 잭다운 + 충전소) |
-| GET | `/poi/{poi_id}/status` | 그 POI의 상태 (empty/calling/arrived) + 가용 다음 POI + 가용 로봇 수 |
+| GET | `/poi/{poi_id}/status` | 그 POI의 상태 (empty/calling/arrived) + 가용 다음 POI + 가용 로봇 수 + `queued_position` |
+| POST | `/poi/{poi_id}/cancel-queue` | 그 POI의 호출 대기열 등록 취소 |
 | GET | `/tablet/poi/{poi_id}` | **위치별 태블릿 HTML** (메인 페이지) |
 
 ### 로봇/관제 기준 (모니터링/레거시)
@@ -224,10 +237,33 @@ conn.commit()
 - ~~TabletApp URL 경로 `/api/dispatch/tablet/{id}`로 변경~~
 - ~~`rcs_vesa_db` 마이그레이션 (18 테이블 + FK 22개 복원)~~
 
-### VESA 모드 (미완료/테스트 필요)
+### VESA 모드 (2026-08-10 갱신)
+
+**실기 확인 완료**
+- ~~충전 중 맵핑 차단(409)~~ / ~~맵핑 모달 무한 대기~~ / ~~렉 반납 정밀화(`to_unload_point`)~~ / ~~충전소 자동 복귀 + `C1-1` 경유~~
+
+**코드 완료 · 실기 검증 대기**
+- `calculation_failed` 조기 중단 + 렉 문맥 문구 (모의 테스트 14/14)
+- 호출 대기열 + 배정 락 (E1/E2/E3, 테스트 23/23 + 대조군 검증)
+  → 검증 방법은 `미해결이슈.md` 의 "검증 대기 목록" 참조
+
+**미완료**
+- **POI upsert (미해결이슈 5번) ← 최우선.** 맵 저장 시 POI가 delete+재생성돼 id가 바뀌고,
+  FK `ON DELETE SET NULL` 때문에 `robots.charging_id` 가 자동으로 지워진다
 - 3대 동시 운영 시 zone_guard / poi_lock 실전 충돌 시나리오 검증
+- 로봇 하드웨어 경보(`/alerts`) 관제 표시 — 2026-08-10 보류 결정
 - 태블릿 UI 실제 사용 후 UX 다듬기 (현재 폴링 2초 → 필요 시 WebSocket)
 - 운영 중 작업자가 잘못된 POI를 누르는 경우의 백엔드 거부 로그/알림
+
+### 테스트 (tests/)
+라이브 DB·로봇을 건드리지 않는 모의 테스트. `python tests/<파일>.py` 로 실행.
+| 파일 | 대상 |
+|---|---|
+| `test_failure_guide.py` | 실패 안내 문구 매핑 (40) |
+| `test_safe_move_stop.py` | `safe_move` 조기 중단 (14) |
+| `test_is_charging.py` | 충전 상태 판정 (16) |
+| `test_dispatch_race.py` | 배정 락 + 대기열 E1/E2/E3 (23) |
+| `race_repro.py` | (구) 레이스 격리 재현 모델 |
 
 ### 프론트엔드 UI (미완료, 레거시 자동 모드용)
 - 맵핑 시작 시 로봇 미연결 안내창
@@ -241,11 +277,8 @@ conn.commit()
 - ~~사이드바에서 "작업관리" 메뉴 제거~~ → 페이지 파일(`/tasks/page.tsx`)은 보존
 
 ## 미해결 이슈
-- `align_with_rack`에서 `rack_area_id` 사용 불가 (regionType 미확인 — AutoXing 문의 필요)
-- `detectRackSize` REST API 없음 (SDK 전용 — AutoXing 문의 필요)
-- 잭 다운 후 로봇 빠져나오기 시간 불확실 (고정 10초 대기 + 400 에러 시 5초 간격 재시도)
-- `to_unload_point` J1 이동 미작동 이슈 확인 필요
-- 맵 변경 시 경로 웨이포인트 POI ID 자동 매핑 필요 (레거시 자동 모드용 — VESA 영향 없음)
+
+→ 별도 파일 [`미해결이슈.md`](미해결이슈.md) 로 분리 관리 (2026-08-06).
 
 ## 업무일지 양식
 

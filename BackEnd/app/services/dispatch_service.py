@@ -54,6 +54,34 @@ class _Worker:
 _workers: dict[int, _Worker] = {}
 _workers_lock = threading.Lock()
 
+# ── 배정 임계구역 (E2/E3) ─────────────────────────────────────
+# "POI 점유 검증 → 가용 로봇 선정 → 세션 생성 → 워커 등록" 을 하나의 원자적 동작으로 만든다.
+# 이게 없으면 여러 태블릿이 거의 동시에 호출할 때
+#   E2) 두 스레드가 같은 로봇을 "가용"으로 보고 → 로봇 1대에 워커 2개
+#   E3) 두 스레드가 같은 POI를 "비어있음"으로 보고 → 로봇 2대가 같은 자리로
+# 가 발생한다(체크와 배정 사이가 비원자적 = check-then-act).
+#
+# RLock 인 이유: call_to_poi 가 이 락을 쥔 채 start_session 을 호출하므로 재진입이 필요하다.
+# 락 순서 규칙: _assign_lock → _workers_lock (역방향 금지 — 데드락 방지)
+# 락 보유 시간: find_available_robot 의 온라인 판정이 백그라운드 캐시라 네트워크를 타지 않고,
+#              DB 왕복 몇 번(수 ms)뿐이라 태블릿 폴링을 막지 않는다.
+_assign_lock = threading.RLock()
+
+
+@dataclass
+class _PendingCall:
+    """호출 대기열 항목 (E1) — 모든 로봇이 바쁠 때 등록해뒀다가 먼저 끝난 로봇에 배정."""
+    poi_id: int
+    with_rack: bool
+    enqueued_at: float
+
+
+# 대기열(FIFO). _assign_lock 으로 보호한다.
+_pending: list[_PendingCall] = []
+
+# 대기 항목 유효시간 — 이 시간을 넘기면 유령 대기로 보고 버린다.
+PENDING_TTL_SEC = 30 * 60
+
 
 def _get_worker(robot_id: int) -> Optional[_Worker]:
     with _workers_lock:
@@ -201,10 +229,14 @@ def _pickup_at_standby(worker: _Worker) -> bool:
 def _move_to_poi(worker: _Worker, poi: dict) -> bool:
     """POI로 standard 이동."""
     jack_service.update_job_status(worker.robot_ip, message=f"이동 중: {poi['name']}")
+    # 같은 실패코드가 3회 연속이면 조기 중단(≈15~20초) → 태블릿 실패 카드가 빨리 뜬다.
+    # 렉 적재 시 9(calculation_failed)가 계속 나오면 200회(≈17분) 재시도해도 안 풀리기 때문.
+    # 사람이 잠깐 지나가서 생긴 단발 실패는 코드가 바뀌거나 성공하므로 기존대로 재시도된다.
     result = jack_service.safe_move(
         worker.robot_ip,
         "standard",
         poi["x"], poi["y"], poi["ori"],
+        stop_on_repeated_fail=3,
     )
     ok = str(result.get("state", "")).lower() == "succeeded"
     if not ok:
@@ -252,11 +284,28 @@ def _return_to_standby_and_park(worker: _Worker) -> None:
         standby = jack_service._get_standby_poi(area_id=worker.area_id, robot_ip=worker.robot_ip)
         if standby:
             jack_service.update_job_status(worker.robot_ip, message="복귀 중: 대기장소")
-            jack_service.safe_move(
+            # 렉 반납은 하역 전용 이동(to_unload_point)으로 한다.
+            # standard 로 보내면 목표 근처에서 "도착"으로 처리돼 렉을 제자리에 못 놓는다.
+            # (2026-08-10 실측: 목표 R1(3.155,3.095) 로 보냈는데 succeeded 응답과 함께
+            #  로봇이 0.717m 앞 (3.205,2.380) 에 정지 → 렉을 자리 앞에 내려놓음)
+            # 설정값은 레거시 경로(jack_service.py 의 force_return)와 동일하게 맞춘다.
+            result = jack_service.safe_move(
                 worker.robot_ip,
-                "standard",
+                "to_unload_point",
                 standby["x"], standby["y"], standby["ori"],
+                max_attempts=30, timeout=120,
             )
+            if str(result.get("state", "")).lower() != "succeeded":
+                # to_unload_point 가 거부되는 상황이면 기존 동작(standard)으로 폴백 —
+                # 정밀도는 떨어져도 최소한 이전과 같은 수준은 보장한다.
+                logger.warning(
+                    f"[dispatch] to_unload_point 실패 — standard 로 폴백: {result}"
+                )
+                jack_service.safe_move(
+                    worker.robot_ip,
+                    "standard",
+                    standby["x"], standby["y"], standby["ori"],
+                )
 
         # standby에 도착 후 잭 다운 (렉 반납)
         _jack_down_step(worker, label="잭 다운 — 대기장소 반납")
@@ -422,6 +471,12 @@ def _worker_loop(worker: _Worker, *, skip_pickup: bool = False) -> None:
         except Exception:
             pass
         _remove_worker(worker.robot_id)
+        # 이 로봇이 비었으니 대기열에서 기다리던 호출을 자동 배정 (E1)
+        # _remove_worker 뒤에 있어야 방금 끝난 로봇이 "가용"으로 잡힌다.
+        try:
+            _drain_pending_queue()
+        except Exception:
+            logger.exception("[dispatch] 대기열 처리 중 예외 (워커 종료는 계속 진행)")
 
 
 # ── DB 상태 갱신 헬퍼 ─────────────────────────────────────────
@@ -458,39 +513,45 @@ def start_session(robot_id: int, first_poi_id: int, with_rack: bool = True) -> t
     """세션 시작. 이미 활성 워커가 있으면 거부.
 
     with_rack=False 면 standby 픽업 단계를 건너뛰고 바로 first_poi로 이동.
+
+    ⚠️ 전체를 _assign_lock 으로 감싼다(E2). 예전엔 has_active_worker 체크와 _set_worker 사이에
+    DB 왕복(_load_robot + create_session)이 끼어 있어, 두 스레드가 그 틈으로 동시에 통과해
+    로봇 1대에 워커가 2개 붙을 수 있었다.
     """
-    if has_active_worker(robot_id):
-        return False, "이미 진행 중인 배차가 있습니다"
+    with _assign_lock:
+        if has_active_worker(robot_id):
+            return False, "이미 진행 중인 배차가 있습니다"
 
-    robot = _load_robot(robot_id)
-    if not robot or not robot.ip_address:
-        return False, "로봇 정보 없음 또는 IP 미설정"
-    if not robot.is_active:
-        return False, "비활성 로봇"
+        robot = _load_robot(robot_id)
+        if not robot or not robot.ip_address:
+            return False, "로봇 정보 없음 또는 IP 미설정"
+        if not robot.is_active:
+            return False, "비활성 로봇"
 
-    poi = _load_poi(first_poi_id)
-    if not poi:
-        return False, "첫 작업 POI 조회 실패"
+        poi = _load_poi(first_poi_id)
+        if not poi:
+            return False, "첫 작업 POI 조회 실패"
 
-    db = SessionLocal()
-    try:
-        session = dispatch_crud.create_session(db, robot_id, first_poi_id, with_rack=with_rack)
-        session_id = session.id
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            session = dispatch_crud.create_session(db, robot_id, first_poi_id, with_rack=with_rack)
+            session_id = session.id
+        finally:
+            db.close()
 
-    worker = _Worker(
-        robot_id=robot_id,
-        session_id=session_id,
-        robot_ip=robot.ip_address,
-        area_id=int(robot.area_id) if robot.area_id else None,
-        with_rack=with_rack,
-    )
-    t = safe_thread(target=_worker_loop, args=(worker,), name=f"dispatch-{robot_id}")
-    worker.thread = t
-    _set_worker(worker)
-    t.start()
-    return True, "ok"
+        worker = _Worker(
+            robot_id=robot_id,
+            session_id=session_id,
+            robot_ip=robot.ip_address,
+            area_id=int(robot.area_id) if robot.area_id else None,
+            with_rack=with_rack,
+        )
+        t = safe_thread(target=_worker_loop, args=(worker,), name=f"dispatch-{robot_id}")
+        worker.thread = t
+        # 스레드 시작 전에 등록해야 "배정됨"이 다른 스레드에 즉시 보인다.
+        _set_worker(worker)
+        t.start()
+        return True, "ok"
 
 
 def send_next(robot_id: int, next_poi_id: int) -> tuple[bool, str]:
@@ -673,41 +734,126 @@ def call_to_poi(poi_id: int, with_rack: bool = True) -> tuple[bool, Optional[str
     반환: (성공 여부, 실패키, 배정된 robot_id)
       - 성공: (True, None, robot_id)
       - 실패: (False, <failure_guide 키>, None)
-        키 예) "POI_OCCUPIED" / "POI_NOT_FOUND" / "NO_ROBOT"
+        키 예) "POI_OCCUPIED" / "POI_NOT_FOUND" / "QUEUED" / "ALREADY_QUEUED"
       실패키는 라우터에서 failure_guide.guide_for(키) 로 안내 카드 문구로 변환된다.
+
+    ⚠️ 전체가 _assign_lock 안에서 돈다(E2/E3). 점유 검증과 실제 배정 사이가 벌어져 있으면
+    여러 태블릿이 동시에 눌렀을 때 같은 로봇/같은 POI 가 이중으로 잡힌다.
+
+    로봇이 하나도 없으면 거부하지 않고 **대기열에 등록**한다(E1).
+    먼저 끝난 워커가 _drain_pending_queue() 로 꺼내서 자동 배정한다.
     """
-    # 1) 점유 검증 — 다른 활성 세션이 그 POI를 current/target으로 들고 있으면 거부
-    if get_session_at_poi(poi_id) or get_session_heading_to_poi(poi_id):
-        return False, "POI_OCCUPIED", None
+    with _assign_lock:
+        # 1) 점유 검증 — 다른 활성 세션이 그 POI를 current/target으로 들고 있으면 거부
+        if get_session_at_poi(poi_id) or get_session_heading_to_poi(poi_id):
+            return False, "POI_OCCUPIED", None
 
-    poi = _load_poi(poi_id)
-    if not poi:
-        return False, "POI_NOT_FOUND", None
+        poi = _load_poi(poi_id)
+        if not poi:
+            return False, "POI_NOT_FOUND", None
 
-    # 2) 가용 로봇 선정 — 같은 area 우선
+        # 2) 가용 로봇 선정 — 같은 area 우선
+        poi_area_id = _area_id_of_poi(poi_id)
+
+        robot = find_available_robot(area_id=poi_area_id)
+        if not robot:
+            # 같은 area 없으면 전체에서 한번 더 시도 (필요 시)
+            robot = find_available_robot(area_id=None)
+        if not robot:
+            # 3) 로봇이 없으면 대기열 등록 (E1) — 거부하지 않는다
+            if any(p.poi_id == poi_id for p in _pending):
+                return False, "ALREADY_QUEUED", None
+            _pending.append(_PendingCall(poi_id=poi_id, with_rack=with_rack,
+                                         enqueued_at=time.time()))
+            logger.info(f"[dispatch] 가용 로봇 없음 — POI {poi_id} 대기열 등록 "
+                        f"({len(_pending)}번째)")
+            return False, "QUEUED", None
+
+        ok, msg = start_session(robot.id, poi_id, with_rack=with_rack)
+        if not ok:
+            # 선정 직후 실패 — 첫 POI 조회 실패면 POI_NOT_FOUND, 그 외는 NO_ROBOT
+            key = "POI_NOT_FOUND" if "POI" in (msg or "") else "NO_ROBOT"
+            return False, key, None
+        return True, None, robot.id
+
+
+def _area_id_of_poi(poi_id: int) -> Optional[int]:
+    """POI가 속한 area_id (robot_maps.area_id 경유). 못 찾으면 None."""
     db = SessionLocal()
     try:
         p = db.query(MapPOI).filter(MapPOI.id == poi_id).first()
-        # POI가 속한 area_id 구하기 — robot_maps.area_id 경유
-        poi_area_id: Optional[int] = None
         if p and p.map_id:
             from app.models.map import RobotMap
             rm = db.query(RobotMap).filter(RobotMap.id == p.map_id).first()
             if rm and rm.area_id is not None:
-                poi_area_id = int(rm.area_id)
+                return int(rm.area_id)
+        return None
     finally:
         db.close()
 
-    robot = find_available_robot(area_id=poi_area_id)
-    if not robot:
-        # 같은 area 없으면 전체에서 한번 더 시도 (필요 시)
-        robot = find_available_robot(area_id=None)
-    if not robot:
-        return False, "NO_ROBOT", None
 
-    ok, msg = start_session(robot.id, poi_id, with_rack=with_rack)
-    if not ok:
-        # 선정 직후 경합으로 start 실패 — 첫 POI 조회 실패면 POI_NOT_FOUND, 그 외는 NO_ROBOT
-        key = "POI_NOT_FOUND" if "POI" in (msg or "") else "NO_ROBOT"
-        return False, key, None
-    return True, None, robot.id
+# ── 호출 대기열 (E1) ──────────────────────────────────────────
+
+
+def _drain_pending_queue() -> None:
+    """대기열에서 FIFO로 꺼내 배정 시도. 워커가 끝날 때마다 호출된다.
+
+    폐기 조건:
+      - TTL(PENDING_TTL_SEC) 초과 — 작업자가 잊고 간 유령 대기
+      - 그 POI에 이미 세션이 생김 — 다른 경로로 이미 로봇이 갔다
+    로봇이 없으면 항목을 남겨두고 다음 기회를 기다린다.
+    """
+    with _assign_lock:
+        if not _pending:
+            return
+        now = time.time()
+        keep: list[_PendingCall] = []
+        for item in _pending:
+            if now - item.enqueued_at > PENDING_TTL_SEC:
+                logger.info(f"[dispatch] 대기열 항목 만료 폐기 — POI {item.poi_id}")
+                continue
+            if get_session_at_poi(item.poi_id) or get_session_heading_to_poi(item.poi_id):
+                logger.info(f"[dispatch] POI {item.poi_id} 는 이미 배정됨 — 대기열에서 제거")
+                continue
+            keep.append(item)
+        _pending[:] = keep
+
+        # 앞에서부터 배정 시도 — 배정된 항목만 제거(로봇이 떨어지면 나머지는 그대로 남음)
+        remaining: list[_PendingCall] = []
+        for idx, item in enumerate(_pending):
+            robot = find_available_robot(area_id=_area_id_of_poi(item.poi_id))
+            if not robot:
+                robot = find_available_robot(area_id=None)
+            if not robot:
+                remaining.extend(_pending[idx:])   # 더 볼 것 없음 — 남은 건 그대로 유지
+                break
+            ok, msg = start_session(robot.id, item.poi_id, with_rack=item.with_rack)
+            if ok:
+                logger.info(f"[dispatch] 대기열 자동 배정 — POI {item.poi_id} "
+                            f"→ robot {robot.id}")
+            else:
+                logger.warning(f"[dispatch] 대기열 배정 실패(다시 대기) — POI {item.poi_id}: {msg}")
+                remaining.append(item)
+        _pending[:] = remaining
+
+
+def pending_position(poi_id: int) -> Optional[int]:
+    """그 POI의 대기 순번(1부터). 대기열에 없으면 None."""
+    with _assign_lock:
+        for i, item in enumerate(_pending):
+            if item.poi_id == poi_id:
+                return i + 1
+        return None
+
+
+def pending_count() -> int:
+    with _assign_lock:
+        return len(_pending)
+
+
+def cancel_pending(poi_id: int) -> bool:
+    """그 POI의 대기 등록을 취소. 취소했으면 True."""
+    with _assign_lock:
+        before = len(_pending)
+        _pending[:] = [p for p in _pending if p.poi_id != poi_id]
+        return len(_pending) != before

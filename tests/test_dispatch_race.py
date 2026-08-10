@@ -16,6 +16,7 @@ import os
 import sys
 import threading
 import time
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "BackEnd"))
 
@@ -64,14 +65,24 @@ class Harness:
         self.session_seq = 1000
         self.occupied_pois = set()        # 세션이 잡고 있는 POI (DB 대체)
         self.lock = threading.Lock()
+        # 대기열은 DB(dispatch_reservations)에 저장된다 → 그 테이블을 흉내낸 저장소.
+        # keep_reservations=True 로 Harness 를 다시 열면 "백엔드 재시작" 을 재현할 수 있다.
+        self.reservations = []            # [{id, poi_id, with_rack, status, created_at}]
+        self.res_seq = 0
+
+    # ── DB(dispatch_reservations) 흉내 ──
+    def _waiting(self):
+        return [r for r in self.reservations if r["status"] == "waiting"]
 
     def __enter__(self):
         self._orig = {k: getattr(ds, k) for k in (
             "_load_robot", "_load_poi", "find_available_robot",
             "get_session_at_poi", "get_session_heading_to_poi",
-            "_area_id_of_poi", "safe_thread",
+            "_area_id_of_poi", "safe_thread", "SessionLocal",
         )}
-        self._orig["create_session"] = ds.dispatch_crud.create_session
+        for fn in ("create_session", "list_waiting_reservations", "create_reservation",
+                   "cancel_reservation", "mark_reservation", "waiting_reservation_position"):
+            self._orig[fn] = getattr(ds.dispatch_crud, fn)
 
         def fake_load_robot(rid):
             time.sleep(self.db_delay)          # ← 여기가 예전에 레이스가 나던 창
@@ -111,29 +122,74 @@ class Harness:
             def is_alive(s):
                 return s._alive
 
+        # ── dispatch_reservations 테이블 흉내 (DB 대신 메모리 리스트) ──
+        class Res(dict):
+            __getattr__ = dict.get
+
+        def fake_list_waiting(db):
+            return [Res(r) for r in sorted(self._waiting(), key=lambda x: (x["created_at"], x["id"]))]
+
+        def fake_create_res(db, poi_id, with_rack=True):
+            for r in self._waiting():
+                if r["poi_id"] == poi_id:
+                    return Res(r), False          # 중복 등록 방지
+            self.res_seq += 1
+            r = {"id": self.res_seq, "poi_id": poi_id, "with_rack": with_rack,
+                 "status": "waiting", "created_at": datetime.utcnow()}
+            self.reservations.append(r)
+            return Res(r), True
+
+        def fake_cancel_res(db, poi_id):
+            for r in self._waiting():
+                if r["poi_id"] == poi_id:
+                    r["status"] = "cancelled"
+                    return True
+            return False
+
+        def fake_mark_res(db, res_id, status):
+            for r in self.reservations:
+                if r["id"] == res_id:
+                    r["status"] = status
+
+        def fake_res_position(db, poi_id):
+            for i, r in enumerate(sorted(self._waiting(), key=lambda x: (x["created_at"], x["id"]))):
+                if r["poi_id"] == poi_id:
+                    return i + 1
+            return None
+
+        class FakeDb:
+            def close(s):
+                pass
+
         ds._load_robot = fake_load_robot
         ds._load_poi = lambda pid: {"name": f"P{pid}", "x": 0.0, "y": 0.0, "ori": 0.0}
         ds.find_available_robot = fake_find_available
         ds.get_session_at_poi = lambda pid: (pid in self.occupied_pois) or None
         ds.get_session_heading_to_poi = lambda pid: None
         ds._area_id_of_poi = lambda pid: 26
+        ds.SessionLocal = lambda: FakeDb()
+        ds.dispatch_crud.list_waiting_reservations = fake_list_waiting
+        ds.dispatch_crud.create_reservation = fake_create_res
+        ds.dispatch_crud.cancel_reservation = fake_cancel_res
+        ds.dispatch_crud.mark_reservation = fake_mark_res
+        ds.dispatch_crud.waiting_reservation_position = fake_res_position
         ds.safe_thread = lambda **kw: FakeThread()
         ds.dispatch_crud.create_session = fake_create_session
-        # 레지스트리/대기열 초기화
+        # 워커 레지스트리(메모리)만 초기화. 예약은 DB 쪽이라 여기서 지우지 않는다.
         with ds._workers_lock:
             ds._workers.clear()
-        ds._pending.clear()
         return self
 
     def __exit__(self, *exc):
+        crud_fns = ("create_session", "list_waiting_reservations", "create_reservation",
+                    "cancel_reservation", "mark_reservation", "waiting_reservation_position")
         for k, v in self._orig.items():
-            if k == "create_session":
-                ds.dispatch_crud.create_session = v
+            if k in crud_fns:
+                setattr(ds.dispatch_crud, k, v)
             else:
                 setattr(ds, k, v)
         with ds._workers_lock:
             ds._workers.clear()
-        ds._pending.clear()
         return False
 
     def finish_worker(self, robot_id):
@@ -231,7 +287,7 @@ print("\n[E1-3] TTL 만료 항목은 폐기")
 with Harness([1]) as h:
     ds.call_to_poi(901, with_rack=True)      # 배정
     ds.call_to_poi(902, with_rack=True)      # 대기
-    ds._pending[0].enqueued_at = time.time() - (ds.PENDING_TTL_SEC + 10)
+    h.reservations[0]["created_at"] = datetime.utcnow() - timedelta(seconds=ds.PENDING_TTL_SEC + 10)
     h.finish_worker(1)
     check("만료 항목 폐기됨", ds.pending_count() == 0, str(ds.pending_count()))
     check("902 는 배정되지 않음", (1, 902) not in h.sessions, str(h.sessions))
@@ -240,10 +296,32 @@ print("\n[E1-4] 이미 세션이 생긴 POI 는 대기열에서 제거")
 with Harness([1, 2]) as h:
     ds.call_to_poi(910, with_rack=True)      # robot1 배정
     ds.call_to_poi(911, with_rack=True)      # robot2 배정
-    ds._pending.append(ds._PendingCall(poi_id=910, with_rack=True, enqueued_at=time.time()))
+    # 이미 로봇이 간 POI 에 대기 항목이 남아 있는 상황을 만든다
+    h.res_seq += 1
+    h.reservations.append({"id": h.res_seq, "poi_id": 910, "with_rack": True,
+                           "status": "waiting", "created_at": datetime.utcnow()})
     h.finish_worker(1)
     check("이미 점유된 POI 항목 제거", ds.pending_position(910) is None,
           f"pending={ds.pending_count()}")
+
+print("\n[E1-5] ⭐ 백엔드가 재시작돼도 대기열이 남아있다 (DB 저장의 핵심 이유)")
+saved = None
+with Harness([1]) as h:
+    ds.call_to_poi(950, with_rack=True)      # robot1 배정
+    ds.call_to_poi(951, with_rack=True)      # 대기열 등록
+    check("대기 1건 등록", ds.pending_count() == 1, str(ds.pending_count()))
+    saved = h.reservations                    # DB 는 백엔드가 죽어도 남는다
+
+# 새 Harness = 백엔드 재시작(메모리 초기화). DB 내용(saved)만 그대로 이어받는다.
+with Harness([1]) as h2:
+    h2.reservations = saved
+    h2.res_seq = max((r["id"] for r in saved), default=0)
+    check("재시작 후에도 대기 1건 살아있음", ds.pending_count() == 1, str(ds.pending_count()))
+    check("순번도 유지", ds.pending_position(951) == 1, str(ds.pending_position(951)))
+    # 재시작 후 로봇이 놀고 있으므로 워커 종료 없이도 다음 배차 기회에 배정된다
+    ds._drain_pending_queue()
+    check("재시작 후 자동 배정됨", (1, 951) in h2.sessions, str(h2.sessions))
+    check("대기열 비었음", ds.pending_count() == 0, str(ds.pending_count()))
 
 print("\n[통합] 대기열 등록과 워커 종료가 동시에 일어나도 이중배정 없음")
 dup = 0

@@ -18,6 +18,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 from app.database import SessionLocal
@@ -68,18 +69,12 @@ _workers_lock = threading.Lock()
 _assign_lock = threading.RLock()
 
 
-@dataclass
-class _PendingCall:
-    """호출 대기열 항목 (E1) — 모든 로봇이 바쁠 때 등록해뒀다가 먼저 끝난 로봇에 배정."""
-    poi_id: int
-    with_rack: bool
-    enqueued_at: float
+# 호출 대기열(E1)은 DB(`dispatch_reservations`)에 둔다 — crud.dispatch 의 reservation 함수들.
+# 메모리에 들고 있으면 백엔드가 재시작될 때 대기가 통째로 사라져서,
+# 작업자는 계속 기다리는데 로봇은 영영 오지 않는다.
+# 동시성은 여전히 _assign_lock 으로 잡는다(DB에 넣어도 "조회 → 배정" 사이 레이스는 그대로다).
 
-
-# 대기열(FIFO). _assign_lock 으로 보호한다.
-_pending: list[_PendingCall] = []
-
-# 대기 항목 유효시간 — 이 시간을 넘기면 유령 대기로 보고 버린다.
+# 대기 항목 유효시간 — 이 시간을 넘기면 유령 대기로 보고 취소 처리한다.
 PENDING_TTL_SEC = 30 * 60
 
 
@@ -760,13 +755,16 @@ def call_to_poi(poi_id: int, with_rack: bool = True) -> tuple[bool, Optional[str
             # 같은 area 없으면 전체에서 한번 더 시도 (필요 시)
             robot = find_available_robot(area_id=None)
         if not robot:
-            # 3) 로봇이 없으면 대기열 등록 (E1) — 거부하지 않는다
-            if any(p.poi_id == poi_id for p in _pending):
+            # 3) 로봇이 없으면 대기열(DB)에 등록 (E1) — 거부하지 않는다
+            db = SessionLocal()
+            try:
+                _, created = dispatch_crud.create_reservation(db, poi_id, with_rack=with_rack)
+                pos = dispatch_crud.waiting_reservation_position(db, poi_id)
+            finally:
+                db.close()
+            if not created:
                 return False, "ALREADY_QUEUED", None
-            _pending.append(_PendingCall(poi_id=poi_id, with_rack=with_rack,
-                                         enqueued_at=time.time()))
-            logger.info(f"[dispatch] 가용 로봇 없음 — POI {poi_id} 대기열 등록 "
-                        f"({len(_pending)}번째)")
+            logger.info(f"[dispatch] 가용 로봇 없음 — POI {poi_id} 대기열 등록 ({pos}번째)")
             return False, "QUEUED", None
 
         ok, msg = start_session(robot.id, poi_id, with_rack=with_rack)
@@ -796,64 +794,77 @@ def _area_id_of_poi(poi_id: int) -> Optional[int]:
 
 
 def _drain_pending_queue() -> None:
-    """대기열에서 FIFO로 꺼내 배정 시도. 워커가 끝날 때마다 호출된다.
+    """대기열(DB)에서 FIFO로 꺼내 배정 시도. 워커가 끝날 때마다 호출된다.
 
-    폐기 조건:
+    취소 처리 조건:
       - TTL(PENDING_TTL_SEC) 초과 — 작업자가 잊고 간 유령 대기
       - 그 POI에 이미 세션이 생김 — 다른 경로로 이미 로봇이 갔다
-    로봇이 없으면 항목을 남겨두고 다음 기회를 기다린다.
+    로봇이 없으면 waiting 그대로 두고 다음 기회를 기다린다.
     """
     with _assign_lock:
-        if not _pending:
-            return
-        now = time.time()
-        keep: list[_PendingCall] = []
-        for item in _pending:
-            if now - item.enqueued_at > PENDING_TTL_SEC:
-                logger.info(f"[dispatch] 대기열 항목 만료 폐기 — POI {item.poi_id}")
-                continue
-            if get_session_at_poi(item.poi_id) or get_session_heading_to_poi(item.poi_id):
-                logger.info(f"[dispatch] POI {item.poi_id} 는 이미 배정됨 — 대기열에서 제거")
-                continue
-            keep.append(item)
-        _pending[:] = keep
+        db = SessionLocal()
+        try:
+            items = dispatch_crud.list_waiting_reservations(db)
+            if not items:
+                return
+            now = datetime.utcnow()
+            alive = []
+            for r in items:
+                created = r.created_at or now
+                if (now - created).total_seconds() > PENDING_TTL_SEC:
+                    logger.info(f"[dispatch] 대기열 항목 만료 — POI {r.poi_id} 취소 처리")
+                    dispatch_crud.mark_reservation(db, r.id, "cancelled")
+                    continue
+                if get_session_at_poi(r.poi_id) or get_session_heading_to_poi(r.poi_id):
+                    logger.info(f"[dispatch] POI {r.poi_id} 는 이미 배정됨 — 대기열에서 제거")
+                    dispatch_crud.mark_reservation(db, r.id, "cancelled")
+                    continue
+                alive.append((r.id, r.poi_id, bool(r.with_rack)))
+        finally:
+            db.close()
 
-        # 앞에서부터 배정 시도 — 배정된 항목만 제거(로봇이 떨어지면 나머지는 그대로 남음)
-        remaining: list[_PendingCall] = []
-        for idx, item in enumerate(_pending):
-            robot = find_available_robot(area_id=_area_id_of_poi(item.poi_id))
+        # 앞에서부터 배정 시도 — 로봇이 떨어지면 나머지는 waiting 으로 그대로 남는다
+        for res_id, poi_id, with_rack in alive:
+            robot = find_available_robot(area_id=_area_id_of_poi(poi_id))
             if not robot:
                 robot = find_available_robot(area_id=None)
             if not robot:
-                remaining.extend(_pending[idx:])   # 더 볼 것 없음 — 남은 건 그대로 유지
                 break
-            ok, msg = start_session(robot.id, item.poi_id, with_rack=item.with_rack)
+            ok, msg = start_session(robot.id, poi_id, with_rack=with_rack)
             if ok:
-                logger.info(f"[dispatch] 대기열 자동 배정 — POI {item.poi_id} "
-                            f"→ robot {robot.id}")
+                logger.info(f"[dispatch] 대기열 자동 배정 — POI {poi_id} → robot {robot.id}")
+                db = SessionLocal()
+                try:
+                    dispatch_crud.mark_reservation(db, res_id, "fulfilled")
+                finally:
+                    db.close()
             else:
-                logger.warning(f"[dispatch] 대기열 배정 실패(다시 대기) — POI {item.poi_id}: {msg}")
-                remaining.append(item)
-        _pending[:] = remaining
+                # 배정 실패는 waiting 유지 — 다음 워커 종료 때 다시 시도한다
+                logger.warning(f"[dispatch] 대기열 배정 실패(다시 대기) — POI {poi_id}: {msg}")
 
 
 def pending_position(poi_id: int) -> Optional[int]:
     """그 POI의 대기 순번(1부터). 대기열에 없으면 None."""
-    with _assign_lock:
-        for i, item in enumerate(_pending):
-            if item.poi_id == poi_id:
-                return i + 1
-        return None
+    db = SessionLocal()
+    try:
+        return dispatch_crud.waiting_reservation_position(db, poi_id)
+    finally:
+        db.close()
 
 
 def pending_count() -> int:
-    with _assign_lock:
-        return len(_pending)
+    db = SessionLocal()
+    try:
+        return len(dispatch_crud.list_waiting_reservations(db))
+    finally:
+        db.close()
 
 
 def cancel_pending(poi_id: int) -> bool:
     """그 POI의 대기 등록을 취소. 취소했으면 True."""
     with _assign_lock:
-        before = len(_pending)
-        _pending[:] = [p for p in _pending if p.poi_id != poi_id]
-        return len(_pending) != before
+        db = SessionLocal()
+        try:
+            return dispatch_crud.cancel_reservation(db, poi_id)
+        finally:
+            db.close()

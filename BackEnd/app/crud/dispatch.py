@@ -4,7 +4,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.dispatch import DispatchSession, TabletSlot
+from app.models.dispatch import DispatchSession, TabletSlot, DispatchReservation
 
 
 def get_active_session(db: Session, robot_id: int) -> Optional[DispatchSession]:
@@ -121,3 +121,76 @@ def occupied_poi_ids(db: Session) -> set[int]:
         if t:
             s.add(t)
     return s
+
+
+# ── 호출 대기열 (DispatchReservation) ─────────────────────────
+# 메모리가 아니라 DB에 두는 이유: 백엔드가 재시작돼도 대기가 남아야 한다.
+
+
+def get_waiting_reservation(db: Session, poi_id: int) -> Optional[DispatchReservation]:
+    """그 POI의 대기 중(waiting) 예약 1건. 없으면 None."""
+    return (
+        db.query(DispatchReservation)
+        .filter(
+            DispatchReservation.poi_id == poi_id,
+            DispatchReservation.status == "waiting",
+        )
+        .order_by(DispatchReservation.id.asc())
+        .first()
+    )
+
+
+def list_waiting_reservations(db: Session) -> list[DispatchReservation]:
+    """대기 중 예약 전체 — 먼저 등록한 순서(FIFO)."""
+    return (
+        db.query(DispatchReservation)
+        .filter(DispatchReservation.status == "waiting")
+        .order_by(DispatchReservation.created_at.asc(), DispatchReservation.id.asc())
+        .all()
+    )
+
+
+def create_reservation(db: Session, poi_id: int, with_rack: bool = True
+                       ) -> tuple[DispatchReservation, bool]:
+    """예약 등록. 반환 (예약, 새로_만들었는지).
+
+    같은 POI에 이미 waiting 예약이 있으면 새로 만들지 않고 기존 것을 돌려준다
+    (작업자가 호출 버튼을 여러 번 눌러도 줄이 늘어나지 않도록).
+    """
+    existing = get_waiting_reservation(db, poi_id)
+    if existing:
+        return existing, False
+    r = DispatchReservation(poi_id=poi_id, with_rack=with_rack, status="waiting")
+    db.add(r)
+    db.commit()
+    db.refresh(r)
+    return r, True
+
+
+def cancel_reservation(db: Session, poi_id: int) -> bool:
+    """그 POI의 대기 예약을 취소. 취소한 게 있으면 True."""
+    r = get_waiting_reservation(db, poi_id)
+    if not r:
+        return False
+    r.status = "cancelled"
+    db.commit()
+    return True
+
+
+def mark_reservation(db: Session, reservation_id: int, status: str) -> None:
+    """예약 상태 변경 (fulfilled / cancelled)."""
+    r = db.query(DispatchReservation).filter(DispatchReservation.id == reservation_id).first()
+    if not r:
+        return
+    r.status = status
+    if status == "fulfilled":
+        r.fulfilled_at = datetime.utcnow()
+    db.commit()
+
+
+def waiting_reservation_position(db: Session, poi_id: int) -> Optional[int]:
+    """그 POI의 대기 순번(1부터). 대기 중이 아니면 None."""
+    for i, r in enumerate(list_waiting_reservations(db)):
+        if r.poi_id == poi_id:
+            return i + 1
+    return None

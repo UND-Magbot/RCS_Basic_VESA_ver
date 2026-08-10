@@ -58,3 +58,30 @@ class TabletSlot(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     poi = relationship("MapPOI")
+
+
+class DispatchReservation(Base):
+    """호출 대기열 — 가용 로봇이 0대일 때 등록해두는 예약.
+
+    태블릿에서 호출했는데 모든 로봇이 작업 중이면 거부하지 않고 여기에 쌓아둔다.
+    어떤 로봇이 작업을 끝내면 먼저 예약한 순서(FIFO)대로 자동 배차된다.
+
+    ⚠️ DB에 저장하는 이유: 메모리에 들고 있으면 백엔드가 재시작될 때 대기가
+    통째로 사라져서, 작업자는 계속 기다리는데 로봇은 영영 오지 않는다.
+
+    status:
+      waiting    — 대기 중 (로봇 배정 대기)
+      fulfilled  — 로봇이 배정되어 자동 호출됨
+      cancelled  — 작업자가 취소했거나 유효시간(TTL) 초과로 무효화
+    """
+    __tablename__ = "dispatch_reservations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    poi_id = Column(Integer, ForeignKey("map_pois.id", ondelete="CASCADE"),
+                    nullable=False, index=True)
+    with_rack = Column(Boolean, nullable=False, default=True)
+    status = Column(String(20), nullable=False, default="waiting", index=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    fulfilled_at = Column(DateTime, nullable=True)
+
+    poi = relationship("MapPOI")

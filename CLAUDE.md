@@ -3,6 +3,36 @@
 ## 언어
 - 모든 답변은 한국어로 작성
 
+---
+
+## ⚠️ 먼저 읽을 것 — 이 폴더가 어느 프로젝트인지 (2026-08-10 정리)
+
+**같은 AutoXing 로봇을 쓰지만 고객사가 다른 별개 프로젝트가 2개 있고, 폴더 이름이 실제 내용과 다릅니다.**
+
+| 바탕화면 폴더 | 실제 git 브랜치 | 고객사 | 로봇 / 랙 |
+|---|---|---|---|
+| **`RCS_Basic_VESA_ver-feature-backend_noah`** ← **여기(이 파일)** | **`feature/luke`** | **VESA(삼성웰스토리)** | crawler_s300_op5 · S300/S600 랙 |
+| `RCS_Basic_VESA_ver-LG` | `feature/backend_noah` 의 ZIP (`.git` 없음) | **LG** | longjack · LG/LG2 랙 |
+
+**폴더 이름에 속지 말 것:**
+- 이 폴더 이름은 `...-feature-backend_noah` 지만 **실제 작업 브랜치는 `feature/luke`** 입니다. 처음 받을 때의 이름이 그대로 남은 것뿐입니다.
+- GitHub의 `feature/backend_noah` 브랜치는 **지금 LG 프로젝트로 전환**돼 있습니다(원작자 Choigyuhwi 님이 진행). VESA 작업은 `feature/luke` 에 쌓입니다.
+
+**🚫 두 프로젝트를 절대 합치지 말 것.** 로봇 모델·랙 스펙·DB·망 환경이 전부 다릅니다:
+
+| | 이 프로젝트(VESA) | LG 프로젝트 |
+|---|---|---|
+| 로봇 | crawler_s300_op5 (2.12.21-opi64) | longjack (2.12.28-pi64) |
+| 랙 | S300 / S600 | S300/S600 + **LG / LG2** |
+| 로컬 DB | `rcs_vesa_db` | `rcs_lg_db` |
+| 망 | 로컬 Wi-Fi | **LTE(M2M)** — 유동 IP·지연 보정 |
+| 태블릿 | 1종 | 콘솔용 / 로봇부착용 2종 |
+
+LG 폴더는 **참고 자료로만** 봅니다(코드 복사 금지). 설계 방식이 참고할 만하면 우리 코드에 맞게 **새로 작성**합니다.
+> 실제 사례(2026-08-10): LG의 "대기열을 DB에 저장" 방식만 참고해 `dispatch_reservations` 를 우리 스타일로 새로 구현. LG 코드는 한 줄도 가져오지 않음.
+
+---
+
 ## 프로젝트 개요
 - RCS (Robot Control System) **VESA 버전** — Basic 모델에서 분기, 인터랙티브 배차 운영 방식으로 전환
 - AutoXing 로봇 제어 시스템 (crawler_s300_op5 모델, 펌웨어 2.12.21-opi64)
@@ -11,7 +41,8 @@
 - 태블릿: Android WebView 셸 (Kotlin) + 백엔드 서빙 HTML
 - DB: MariaDB (192.168.0.21, **rcs_vesa_db**)
 - 로컬 REST API만 사용 (CSP/클라우드 미사용)
-- GitHub: https://github.com/UND-Magbot/RCS_Basic_VESA_ver (브랜치: `feature/backend_noah`)
+- GitHub: https://github.com/UND-Magbot/RCS_Basic_VESA_ver — **작업 브랜치 `feature/luke`**
+  (`feature/backend_noah` 는 원작자 브랜치이며 현재 LG 프로젝트용. 위 "먼저 읽을 것" 참조)
 
 ## VESA 운영 방식 (인터랙티브 배차 — 핵심)
 
@@ -53,6 +84,8 @@
 - 가용 로봇 = 활성 워커 없음 (=충전소 대기) + `is_active=True` + `ip_address` 있음 + 온라인(백그라운드 캐시)
 - 우선순위: **`robot_status.battery_level` 내림차순 → robot_id 오름차순**
 - **가용 로봇 0대면 대기열(FIFO)에 등록** → 먼저 끝난 워커가 자동 배정 (2026-08-10)
+  대기열은 **DB `dispatch_reservations` 테이블**에 저장한다(메모리 아님) — 백엔드가 재시작돼도
+  대기가 살아남아야 하기 때문. TTL 30분, 같은 POI 중복 등록 방지, 취소 API 있음
 - **배정 전 구간은 `_assign_lock`(RLock)으로 원자화** — 점유 검증 → 로봇 선정 → 세션 생성 → 워커 등록.
   락 없이 두면 여러 태블릿 동시 호출 시 같은 로봇/같은 POI가 이중으로 잡힌다(E2/E3).
   락 순서 규칙: `_assign_lock → _workers_lock` (역방향 금지)
@@ -169,6 +202,10 @@
 | `activity_logs`, `alarm_logs` | 활동/알람 로그 |
 | `task_routes`, `task_route_waypoints`, `scheduled_tasks`, `task_history` | 레거시 자동 모드용 (VESA 미사용, 데이터 보존) |
 | **`dispatch_sessions`** | **VESA 인터랙티브 배차 세션 (상태 머신 영속)** |
+| **`dispatch_reservations`** | **호출 대기열** (가용 로봇 0대일 때 등록 → FIFO 자동 배정). 2026-08-10 도입 |
+
+> 테이블은 Alembic 없이 `database.py` 의 `Base.metadata.create_all()` 로 만든다 —
+> 모델을 추가하고 백엔드를 재시작하면 **없는 테이블만** 자동 생성된다(기존 테이블은 건드리지 않음).
 
 ## 개발 규칙
 - 백엔드 실행: `cd BackEnd; $env:DB_NAME="rcs_vesa_db"; python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000`

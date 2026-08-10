@@ -5,7 +5,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="UND RCS"
+        android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="true"

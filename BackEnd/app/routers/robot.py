@@ -50,7 +50,7 @@ def api_get_robot_quick_status(robot_ip: str):
     import requests as req
     result = {"online": False, "run_state": "OFFLINE", "battery": "-"}
     try:
-        r = req.get(f"http://{robot_ip}:8090/chassis/status", timeout=2)
+        r = req.get(f"http://{robot_ip}:8090/chassis/status", timeout=8)
         if r.status_code == 200:
             result["online"] = True
             data = r.json()
@@ -61,7 +61,7 @@ def api_get_robot_quick_status(robot_ip: str):
                 result["run_state"] = "REMOTE"
             else:
                 try:
-                    mr = req.get(f"http://{robot_ip}:8090/chassis/moves/current", timeout=2)
+                    mr = req.get(f"http://{robot_ip}:8090/chassis/moves/current", timeout=8)
                     if mr.status_code == 200 and mr.json().get("state") == "moving":
                         result["run_state"] = "MOVING"
                     else:
@@ -74,7 +74,7 @@ def api_get_robot_quick_status(robot_ip: str):
     ws = None
     try:
         import websocket as _ws, json as _json, time as _time
-        ws = _ws.create_connection(f"ws://{robot_ip}:8090/ws/v2/topics", timeout=2)
+        ws = _ws.create_connection(f"ws://{robot_ip}:8090/ws/v2/topics", timeout=8)
         ws.send(_json.dumps({"enable_topic": "/battery_state"}))
         deadline = _time.time() + 2
         while _time.time() < deadline:
@@ -528,7 +528,7 @@ def api_switch_floor(robot_id: int, body: dict, db: Session = Depends(get_db)):
     # LiDAR 위치 자동 탐색
     try:
         req.post(f"http://{robot_ip}:8090/services/start_global_positioning",
-                 json={}, timeout=5)
+                 json={}, timeout=10)
         logger.info(f"[switch-floor] LiDAR 위치 자동 탐색 시작")
     except Exception as e:
         logger.warning(f"[switch-floor] LiDAR 위치 탐색 실패: {e}")
@@ -605,7 +605,7 @@ def api_cancel_robot_move(robot_ip: str):
     try:
         r = http_req.patch(
             f"http://{robot_ip}:8090/chassis/moves/current",
-            json={"state": "cancelled"}, timeout=5
+            json={"state": "cancelled"}, timeout=10
         )
         return {"message": "이동 취소 완료", "status": r.status_code}
     except Exception as e:
@@ -617,7 +617,7 @@ def api_get_robot_target(robot_ip: str):
     """로봇의 현재 이동 목표 조회"""
     import requests as http_req
     try:
-        r = http_req.get(f"http://{robot_ip}:8090/chassis/moves/current", timeout=3)
+        r = http_req.get(f"http://{robot_ip}:8090/chassis/moves/current", timeout=8)
         if r.status_code == 404:
             return {"state": "idle", "target_x": None, "target_y": None}
         data = r.json()
@@ -642,34 +642,70 @@ def api_set_control_mode(robot_ip: str, body: dict):
         r = req.post(
             f"http://{robot_ip}:8090/services/wheel_control/set_control_mode",
             json={"control_mode": mode},
-            timeout=5,
+            timeout=10,
         )
         return {"status": r.status_code, "mode": mode}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── 원격 조종용 WebSocket 연결 재사용 풀 ──
+# twist 는 300ms 마다 들어오는데, 매번 새 WebSocket 을 열면 LTE 에서 연결 수립(0.4s)만으로
+# 명령이 밀린다. 로봇별로 연결을 하나 유지해 재사용하면 전송만(수 ms) 하면 된다.
+import threading as _threading
+
+_twist_ws: dict = {}          # robot_ip -> websocket connection
+_twist_lock = _threading.Lock()
+
+
+def _get_twist_ws(robot_ip: str):
+    import websocket
+    with _twist_lock:
+        ws = _twist_ws.get(robot_ip)
+        if ws is not None:
+            return ws
+        ws = websocket.create_connection(
+            f"ws://{robot_ip}:8090/ws/v2/topics", timeout=8
+        )
+        _twist_ws[robot_ip] = ws
+        return ws
+
+
+def _drop_twist_ws(robot_ip: str):
+    with _twist_lock:
+        ws = _twist_ws.pop(robot_ip, None)
+    if ws is not None:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
 @router.post("/remote/twist/{robot_ip}")
 def api_send_twist(robot_ip: str, body: dict):
-    """WebSocket /twist 명령을 프록시로 전송"""
-    import websocket
+    """WebSocket /twist 명령을 프록시로 전송 (연결 재사용)."""
+    import json as _json
     lv = body.get("linear_velocity", 0)
     av = body.get("angular_velocity", 0)
-    try:
-        ws = websocket.create_connection(
-            f"ws://{robot_ip}:8090/ws/v2/topics", timeout=3
-        )
-        ws.send(
-            __import__("json").dumps({
-                "topic": "/twist",
-                "linear_velocity": lv,
-                "angular_velocity": av,
-            })
-        )
-        ws.close()
-        return {"ok": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    payload = _json.dumps({"topic": "/twist", "linear_velocity": lv, "angular_velocity": av})
+
+    # 유지 중인 연결로 전송 → 실패(끊김)면 1회 재연결 후 재시도
+    for attempt in (1, 2):
+        try:
+            ws = _get_twist_ws(robot_ip)
+            ws.send(payload)
+            return {"ok": True}
+        except Exception as e:
+            _drop_twist_ws(robot_ip)
+            if attempt == 2:
+                raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/remote/twist-close/{robot_ip}")
+def api_close_twist(robot_ip: str):
+    """원격 조종 종료 — 유지하던 WebSocket 연결 정리 (모달 닫을 때 호출)."""
+    _drop_twist_ws(robot_ip)
+    return {"ok": True}
 
 
 @router.post("/remote/cancel-move/{robot_ip}")
@@ -680,7 +716,7 @@ def api_cancel_move(robot_ip: str):
         r = req.patch(
             f"http://{robot_ip}:8090/chassis/moves/current",
             json={"state": "cancelled"},
-            timeout=5,
+            timeout=10,
         )
         return {"status": r.status_code}
     except Exception as e:
@@ -695,7 +731,7 @@ def api_get_speed(robot_ip: str, db: Session = Depends(get_db)):
     robot = db.query(Robot).filter(Robot.ip_address == robot_ip, Robot.is_active == True).first()
     speed = robot.max_speed if robot and robot.max_speed else 1.2
     try:
-        r = req.get(f"http://{robot_ip}:8090/robot-params", timeout=3)
+        r = req.get(f"http://{robot_ip}:8090/robot-params", timeout=8)
         params = r.json()
         return {
             "max_forward_velocity": speed,
@@ -726,7 +762,7 @@ def api_set_speed(robot_ip: str, body: dict, db: Session = Depends(get_db)):
     # 2) 로봇에 전송 (실패해도 DB는 이미 저장됨)
     try:
         req.post(f"http://{robot_ip}:8090/robot-params",
-                 json={"/wheel_control/max_forward_velocity": speed}, timeout=5)
+                 json={"/wheel_control/max_forward_velocity": speed}, timeout=10)
     except Exception:
         pass
     return {"ok": True, "max_forward_velocity": speed}
@@ -744,13 +780,13 @@ def api_stop_all(robot_ip: str):
         req.patch(
             f"http://{robot_ip}:8090/chassis/moves/current",
             json={"state": "cancelled"},
-            timeout=5,
+            timeout=10,
         )
     except Exception:
         pass
     # 3) 잭이 올라가 있으면 잭 다운
     try:
-        req.post(f"http://{robot_ip}:8090/services/jack_down", json={}, timeout=5)
+        req.post(f"http://{robot_ip}:8090/services/jack_down", json={}, timeout=10)
     except Exception:
         pass
     return {"ok": True, "message": "모든 작업이 정지되었습니다"}
@@ -881,6 +917,23 @@ def api_return_to_standby_now(robot_ip: str):
     return {"ok": True, "message": f"대기장소({standby['name']}) 복귀 시작"}
 
 
+@router.post("/remote/clear-dispatch/{robot_ip}")
+def api_clear_dispatch(robot_ip: str, db: Session = Depends(get_db)):
+    """실행 중인 배차 작업을 로봇 이동 없이 강제 정리 (원격제어에서 호출).
+
+    로봇은 물리적으로 그대로 두고(잭/위치 유지) 배차 세션만 종료 → 로봇이 다시 가용해진다.
+    충전소로 보내려면 '충전소 복귀'를 별도로 사용.
+    """
+    from app.services import dispatch_service
+    robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
+    if not robot:
+        raise HTTPException(status_code=404, detail="등록되지 않은 로봇입니다")
+    ok, msg = dispatch_service.force_clear(robot.id)
+    if not ok:
+        raise HTTPException(status_code=409, detail=msg)
+    return {"ok": True, "message": msg, "robot_id": robot.id}
+
+
 @router.post("/remote/dock/{robot_ip}")
 def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
     """충전소로 복귀"""
@@ -934,7 +987,7 @@ def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
                 "target_y": ay,
                 "target_ori": ayaw,
             },
-            timeout=5,
+            timeout=10,
         )
         # 2) charge 명령 — target_ori 명시 (로봇 정렬 후 정확한 충전기 인식)
         import threading
@@ -952,7 +1005,7 @@ def api_dock_to_charger(robot_ip: str, db: Session = Depends(get_db)):
                         "target_ori": cyaw,
                         "charge_retry_count": 3,
                     },
-                    timeout=5,
+                    timeout=10,
                 )
             except Exception:
                 pass
@@ -972,7 +1025,7 @@ def api_jack_control(robot_ip: str, action: str):
         r = req.post(
             f"http://{robot_ip}:8090/services/{action}",
             json={},
-            timeout=5,
+            timeout=10,
         )
         return {"status": r.status_code}
     except Exception as e:
@@ -987,7 +1040,7 @@ def api_shutdown_robot(robot_ip: str):
         r = req.post(
             f"http://{robot_ip}:8090/services/baseboard/shutdown",
             json={"target": "main_power_supply", "reboot": False},
-            timeout=5,
+            timeout=10,
         )
         return {"status": r.status_code, "message": "로봇 종료 명령 전송"}
     except Exception as e:

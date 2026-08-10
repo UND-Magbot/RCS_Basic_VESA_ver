@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>로봇 태블릿 — {{ROBOT_NAME}}</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+      background: #0e1218; color: #e6eaf2; height: 100vh;
+      display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: clamp(10px, 1.6vw, 16px) clamp(14px, 2.4vw, 24px);
+      background: #161b24; border-bottom: 1px solid #232b38;
+    }
+    header .robot { font-size: clamp(17px, 2.6vw, 24px); font-weight: 700; flex: 1; }
+    header .badge {
+      font-size: clamp(12px, 1.6vw, 16px); padding: 5px 14px; border-radius: 999px;
+      background: #2b323e; color: #8a93a6; font-weight: 600; white-space: nowrap;
+    }
+    header .badge.moving   { background: #1e3a5a; color: #6db5ff; }
+    header .badge.confirm  { background: #1e4d33; color: #6dd99b; }
+    header .badge.waiting  { background: #4a3a1e; color: #ffd36d; }
+    header .badge.returning{ background: #4d2a1e; color: #ffa46d; }
+
+    main {
+      flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: clamp(16px, 3vw, 40px); text-align: center; gap: clamp(14px, 2.5vh, 30px);
+    }
+    .big-state { font-size: clamp(22px, 5vw, 48px); font-weight: 800; line-height: 1.25; }
+    .sub-state { font-size: clamp(15px, 2.6vw, 24px); color: #9fb0c8; line-height: 1.4; }
+    .next-line { font-size: clamp(18px, 3.4vw, 32px); font-weight: 700; color: #6dd99b; }
+    .next-line .arrow { color: #5a6573; }
+
+    /* 진행 단계 */
+    .steps { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; max-width: 95%; }
+    .step {
+      font-size: clamp(12px, 1.6vw, 17px); padding: 6px 12px; border-radius: 999px;
+      background: #1a212c; border: 1px solid #2c3543; color: #8a93a6; white-space: nowrap;
+    }
+    .step.done    { background: #16261c; border-color: #1e6e44; color: #6dd99b; }
+    .step.current { background: #14233a; border-color: #2f6fff; color: #9cc4ff; font-weight: 700; }
+
+    footer {
+      padding: clamp(12px, 2vw, 20px); display: flex; flex-direction: column; gap: 12px;
+      border-top: 1px solid #232b38; background: #11151c;
+    }
+    .btn {
+      border: none; border-radius: 14px; font-weight: 800; color: #fff; cursor: pointer; width: 100%;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-confirm {
+      background: #2f8f5a; padding: clamp(18px, 4vh, 34px); font-size: clamp(22px, 4vw, 40px);
+    }
+    .btn-confirm:disabled { background: #2a3343; color: #5a6573; cursor: not-allowed; }
+    .btn-end {
+      background: transparent; color: #c0566b; border: 1px solid #5a2b35;
+      padding: clamp(10px, 1.8vh, 16px); font-size: clamp(14px, 2vw, 19px);
+    }
+
+    /* 종료 확인 모달 */
+    .overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+      display: none; align-items: center; justify-content: center; padding: 24px; z-index: 50;
+    }
+    .overlay.show { display: flex; }
+    .modal { background: #1a212c; border: 1px solid #2c3543; border-radius: 16px; padding: 24px; max-width: 460px; width: 100%; }
+    .modal h2 { margin: 0 0 12px; font-size: clamp(18px, 2.6vw, 24px); }
+    .modal p { color: #9fb0c8; margin: 0 0 20px; font-size: clamp(14px, 1.9vw, 18px); }
+    .modal .row { display: flex; gap: 10px; }
+    .modal .row .btn { border-radius: 10px; padding: 14px; font-size: clamp(15px, 2vw, 19px); }
+    .btn-danger { background: #c0392b; }
+    .btn-ghost { background: #2a3343; }
+
+    #toast {
+      position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+      background: #2c3543; color: #fff; padding: 12px 20px; border-radius: 10px;
+      font-size: 15px; opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 80;
+    }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="robot">{{ROBOT_NAME}}</span>
+    <span class="badge" id="badge">연결 중…</span>
+  </header>
+
+  <main id="main">
+    <div class="big-state">상태를 불러오는 중…</div>
+  </main>
+
+  <footer>
+    <button class="btn btn-confirm" id="confirm-btn" disabled>확인</button>
+    <button class="btn btn-end" id="end-btn">작업 종료</button>
+  </footer>
+
+  <div class="overlay" id="end-modal">
+    <div class="modal">
+      <h2>작업 종료</h2>
+      <p id="end-hint">로봇을 종료하고 충전소로 복귀시킵니다.</p>
+      <div class="row">
+        <button class="btn btn-danger" id="end-ok">종료</button>
+        <button class="btn btn-ghost" id="end-cancel">취소</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    const ROBOT_ID = parseInt("{{ROBOT_ID}}");
+    let state = null;
+
+    async function api(url, opts) {
+      const res = await fetch(url, Object.assign({ headers: { "Content-Type": "application/json" } }, opts || {}));
+      if (!res.ok) {
+        let msg = res.statusText;
+        try { const j = await res.json(); msg = j.detail || msg; } catch (e) {}
+        throw new Error(msg);
+      }
+      try { return await res.json(); } catch (e) { return {}; }
+    }
+
+    let toastTimer = null;
+    function toast(msg) {
+      const t = document.getElementById("toast");
+      t.textContent = msg; t.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+    }
+
+    function stepsHtml(wps) {
+      if (!wps || !wps.length) return "";
+      const items = wps.map(w => {
+        const cls = w.status === "done" ? "done" : (w.status === "current" ? "current" : "");
+        const mark = w.status === "done" ? "✓ " : "";
+        return `<span class="step ${cls}">${mark}${w.poi_name || ("#" + w.poi_id)}</span>`;
+      }).join("");
+      return `<div class="steps">${items}</div>`;
+    }
+
+    function render() {
+      const badge = document.getElementById("badge");
+      const main = document.getElementById("main");
+      const confirmBtn = document.getElementById("confirm-btn");
+      const endBtn = document.getElementById("end-btn");
+      if (!state) return;
+
+      // 활성 배차 없음
+      if (!state.active) {
+        badge.textContent = "대기"; badge.className = "badge";
+        main.innerHTML = `<div class="big-state">대기 중</div>
+          <div class="sub-state">진행 중인 작업이 없습니다.<br/>관제에서 호출하면 이 화면이 바뀝니다.</div>`;
+        confirmBtn.disabled = true; confirmBtn.textContent = "확인";
+        endBtn.style.display = "none";
+        return;
+      }
+      endBtn.style.display = "";
+
+      const s = state.session_status;
+      const wps = state.waypoints || [];
+
+      if (s === "awaiting_next") {
+        badge.textContent = "경로 대기"; badge.className = "badge waiting";
+        main.innerHTML = `<div class="big-state">${state.current_poi_name || "현재 위치"} 도착</div>
+          <div class="sub-state">관제(콘솔)에서 경유지를 등록하고<br/>출발을 누르면 이동을 시작합니다.</div>`;
+        confirmBtn.disabled = true; confirmBtn.textContent = "관제 대기 중";
+        return;
+      }
+
+      if (s === "moving") {
+        badge.textContent = "이동 중"; badge.className = "badge moving";
+        const dest = wps.find(w => w.status === "current");
+        main.innerHTML = `<div class="big-state">이동 중</div>
+          ${dest ? `<div class="next-line"><span class="arrow">→</span> ${dest.poi_name}</div>` : ""}
+          <div class="sub-state">목적지에 도착하면 확인 버튼이 활성화됩니다.</div>
+          ${stepsHtml(wps)}`;
+        confirmBtn.disabled = true; confirmBtn.textContent = "이동 중…";
+        return;
+      }
+
+      if (s === "awaiting_confirm") {
+        badge.textContent = "도착 — 확인"; badge.className = "badge confirm";
+        const nextTxt = state.is_last
+          ? `<div class="next-line">확인 시 <b>작업 종료</b> → 충전소 복귀</div>`
+          : `<div class="next-line"><span class="arrow">다음 →</span> ${state.next_poi_name || "-"}</div>`;
+        main.innerHTML = `<div class="big-state">${state.current_poi_name || "현재 위치"} 도착</div>
+          <div class="sub-state">작업을 마친 뒤 아래 <b>확인</b>을 누르세요.</div>
+          ${nextTxt}
+          ${stepsHtml(wps)}`;
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = state.is_last ? "확인 — 작업 종료" : "확인 — 다음 위치로";
+        return;
+      }
+
+      if (s === "returning") {
+        badge.textContent = "복귀 중"; badge.className = "badge returning";
+        main.innerHTML = `<div class="big-state">복귀 중</div>
+          <div class="sub-state">대기장소를 거쳐 충전소로 돌아갑니다.</div>`;
+        confirmBtn.disabled = true; confirmBtn.textContent = "확인";
+        endBtn.style.display = "none";
+        return;
+      }
+
+      // 기타 (starting/picking_up 등)
+      badge.textContent = s || "-"; badge.className = "badge";
+      main.innerHTML = `<div class="big-state">준비 중…</div>
+        <div class="sub-state">${s || ""}</div>`;
+      confirmBtn.disabled = true; confirmBtn.textContent = "확인";
+    }
+
+    // 액션 중에는 폴링이 낙관적 화면을 되돌리지 않도록 스킵
+    let pendingActions = 0;
+
+    async function onConfirm() {
+      if (!state || !state.can_confirm) return;
+      const wasLast = state.is_last;
+
+      // 낙관적 반영 — 누르는 즉시 이동 중 / 복귀 중으로 전환
+      state = Object.assign({}, state, {
+        session_status: wasLast ? "returning" : "moving",
+        can_confirm: false,
+      });
+      render();
+
+      pendingActions++;
+      try {
+        await api(`/api/dispatch/robot/${ROBOT_ID}/confirm`, { method: "POST" });
+        toast(wasLast ? "작업을 종료합니다" : "다음 위치로 이동합니다");
+      } catch (e) {
+        toast("확인 실패: " + e.message);
+      } finally {
+        pendingActions--;
+        refresh(true);  // 실제 상태 동기화 (실패 시 자동 복원)
+      }
+    }
+    document.getElementById("confirm-btn").onclick = onConfirm;
+
+    document.getElementById("end-btn").onclick = () =>
+      document.getElementById("end-modal").classList.add("show");
+    document.getElementById("end-cancel").onclick = () =>
+      document.getElementById("end-modal").classList.remove("show");
+    document.getElementById("end-ok").onclick = async () => {
+      document.getElementById("end-modal").classList.remove("show");
+
+      state = Object.assign({}, state || {}, {
+        session_status: "returning", can_confirm: false,
+      });
+      render();
+
+      pendingActions++;
+      try {
+        await api(`/api/dispatch/robot/${ROBOT_ID}/end`, { method: "POST" });
+        toast("작업을 종료합니다");
+      } catch (e) {
+        toast("종료 실패: " + e.message);
+      } finally {
+        pendingActions--;
+        refresh(true);
+      }
+    };
+
+    async function refresh(force) {
+      if (!force && pendingActions > 0) return;
+      try {
+        state = await api(`/api/dispatch/robot/${ROBOT_ID}/tablet-status`);
+        render();
+      } catch (e) { console.error(e); }
+    }
+
+    refresh(true);
+    setInterval(() => refresh(false), 3000);  // LTE: 부하·데이터 절감
+  </script>
+</body>
+</html>

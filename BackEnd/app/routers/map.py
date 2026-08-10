@@ -362,17 +362,32 @@ def api_connect_robot(sn: str, db: Session = Depends(get_db)):
             detail=f"로봇 IP 주소가 등록되어 있지 않습니다: {sn}",
         )
 
+    headers = {"Secret": DEFAULT_SECRET}
+    base = f"http://{robot.ip_address}:8090"
+
+    # 연결 확인은 '가벼운' 경로로 한다.
+    # /device/info 는 LTE(M2M) 에서 응답이 커서 막히는(0 bytes) 사례가 있어 연결 판정에 쓰면
+    # 멀쩡한 로봇도 실패로 뜬다. /chassis/current-map 은 작아서 LTE 에서도 안정적으로 온다.
+    #
+    # 판정 기준은 'HTTP 응답이 오는가'(로봇이 살아있는가)이다. 현재 맵이 선택 안 돼서
+    # 404 가 와도 로봇 자체는 연결된 것이므로 성공으로 본다. 연결이 끊긴 경우(연결 거부/
+    # 타임아웃)만 실패로 처리한다.
     try:
-        url = f"http://{robot.ip_address}:8090/device/info"
-        headers = {"Secret": DEFAULT_SECRET}
-        res = http_requests.get(url, headers=headers, timeout=10)
-        res.raise_for_status()
-        device_info = res.json()
-    except Exception as exc:
+        http_requests.get(f"{base}/chassis/current-map", headers=headers, timeout=10)
+    except http_requests.exceptions.RequestException as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"로봇에 연결하지 못했습니다: {exc}",
         )
+
+    # 상세 정보(device_info)는 되면 부가로 붙이고, 막혀도 연결은 성공으로 처리
+    device_info = None
+    try:
+        di = http_requests.get(f"{base}/device/info", headers=headers, timeout=3)
+        if di.ok:
+            device_info = di.json()
+    except Exception:
+        pass
 
     return {
         "connected": True,
@@ -500,12 +515,13 @@ def api_delete_area(area_id: int, db: Session = Depends(get_db)):
 
 # ── 매핑 결과 저장 / 조회 ─────────────────────────────────────
 
-def _download_robot_image(url: str, prefix: str = "map") -> str | None:
+def _download_robot_image(url: str, prefix: str = "map", secret: str | None = None) -> str | None:
     """로봇 이미지를 다운로드하여 로컬에 저장하고, 서버 경로를 반환."""
     if not url:
         return None
     try:
-        res = http_requests.get(url, timeout=15)
+        headers = {"Secret": secret} if secret else {}
+        res = http_requests.get(url, headers=headers, timeout=60)  # LTE 대용량 대응
         res.raise_for_status()
         # 확장자 추출
         content_type = res.headers.get("Content-Type", "")
@@ -522,48 +538,191 @@ def _download_robot_image(url: str, prefix: str = "map") -> str | None:
 
 
 def _download_robot_map_data(download_url: str, secret: str | None = None) -> str | None:
-    """로봇 맵 데이터(JSON)를 다운로드하여 로컬에 저장하고, 서버 경로를 반환."""
+    """로봇 맵 데이터(JSON)를 다운로드하여 로컬에 저장하고, 서버 경로를 반환.
+
+    LTE(M2M) 는 업로드가 느리고 불안정해 대용량 전송이 중간에 끊기므로,
+    timeout 을 넉넉히 두고 여러 번 재시도한다. (근본적으로는 매핑은 WiFi 권장)
+    """
     if not download_url:
         return None
-    try:
-        headers = {"Secret": secret} if secret else {}
-        res = http_requests.get(download_url, headers=headers, timeout=30)
-        res.raise_for_status()
-        filename = f"map_data_{uuid.uuid4().hex[:12]}.json"
-        filepath = STATIC_MAPS_DIR / filename
-        filepath.write_bytes(res.content)
-        return f"/static/maps/{filename}"
-    except Exception as e:
-        logger.error(f"[save_map] 맵 데이터 다운로드 실패 ({download_url}): {e}")
-        return None
+    headers = {"Secret": secret} if secret else {}
+    for attempt in range(1, 4):
+        try:
+            res = http_requests.get(download_url, headers=headers, timeout=180)
+            res.raise_for_status()
+            filename = f"map_data_{uuid.uuid4().hex[:12]}.json"
+            filepath = STATIC_MAPS_DIR / filename
+            filepath.write_bytes(res.content)
+            return f"/static/maps/{filename}"
+        except Exception as e:
+            logger.warning(f"[save_map] 맵 데이터 다운로드 실패 (시도 {attempt}/3, {download_url}): {e}")
+    logger.error(f"[save_map] 맵 데이터 다운로드 최종 실패 ({download_url})")
+    return None
 
 
 def _download_robot_file(url: str, prefix: str, ext: str, secret: str | None = None) -> str | None:
     """로봇 파일(bag, trajectories 등)을 다운로드하여 /static/maps/에 저장."""
     if not url:
         return None
+    headers = {"Secret": secret} if secret else {}
+    for attempt in range(1, 4):
+        try:
+            res = http_requests.get(url, headers=headers, timeout=180)  # LTE 대용량 대응
+            res.raise_for_status()
+            filename = f"{prefix}_{uuid.uuid4().hex[:12]}{ext}"
+            filepath = STATIC_MAPS_DIR / filename
+            filepath.write_bytes(res.content)
+            return f"/static/maps/{filename}"
+        except Exception as e:
+            logger.warning(f"[save_map] 파일 다운로드 실패 (시도 {attempt}/3, {url}): {e}")
+    logger.error(f"[save_map] 파일 다운로드 최종 실패 ({url})")
+    return None
+
+
+def _replace_url_host(url: str, new_ip: str) -> str:
+    """URL 의 host 를 new_ip 로 교체 (포트/경로는 유지).
+
+    LTE 유동 IP 대응: 매핑 결과 URL 에는 '매핑 당시 IP' 가 박혀 있는데,
+    저장 시점엔 로봇 IP 가 바뀌어 있을 수 있어 그대로 다운받으면 실패한다.
+    저장 시점의 현재 로봇 IP 로 host 만 바꿔치기한다.
+    """
+    if not url or not new_ip:
+        return url
     try:
-        headers = {"Secret": secret} if secret else {}
-        res = http_requests.get(url, headers=headers, timeout=60)
-        res.raise_for_status()
-        filename = f"{prefix}_{uuid.uuid4().hex[:12]}{ext}"
-        filepath = STATIC_MAPS_DIR / filename
-        filepath.write_bytes(res.content)
-        return f"/static/maps/{filename}"
+        from urllib.parse import urlparse, urlunparse
+        p = urlparse(url)
+        if not p.hostname:
+            return url
+        netloc = f"{new_ip}:{p.port}" if p.port else new_ip
+        return urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        return url
+
+
+def _read_tracked_pose(robot_ip: str, timeout: float = 5.0) -> Optional[dict]:
+    """WS /tracked_pose 로 현재 포즈 읽기 → {'position':[x,y,0], 'ori':theta}. 실패 시 None.
+
+    이 펌웨어는 GET /chassis/pose 가 help 텍스트만 반환하므로 REST 로는 못 읽는다.
+    """
+    import websocket as _ws
+    import time as _time
+    ws = None
+    try:
+        ws = _ws.create_connection(f"ws://{robot_ip}:8090/ws/v2/topics", timeout=3)
+        ws.send(json.dumps({"enable_topic": "/tracked_pose"}))
+        ws.settimeout(2)
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            try:
+                pkt = json.loads(ws.recv())
+            except Exception:
+                continue
+            if pkt.get("topic") == "/tracked_pose" and pkt.get("pos"):
+                pos = pkt["pos"]
+                return {
+                    "position": [float(pos[0]), float(pos[1]), 0],
+                    "ori": float(pkt.get("ori", 0.0)),
+                }
     except Exception as e:
-        logger.error(f"[save_map] 파일 다운로드 실패 ({url}): {e}")
+        logger.warning(f"[sync] tracked_pose 읽기 실패 ({robot_ip}): {e}")
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:
+                pass
+    return None
+
+
+def _reselect_current_map_keep_pose(robot_ip: str, secret: str, map_id: int,
+                                    timeout: int = 10) -> bool:
+    """current-map 재선택(overlay 리로드) 시 리로컬라이즈로 포즈가 리셋되는 것을 막는다.
+
+    1) 재선택 직전 포즈를 WS 로 저장
+    2) current-map 설정 — 실제로 설정될 때까지 검증(GET)하며 최대 3회 재시도
+       (LTE/펌웨어 지연으로 한 번에 안 먹어 '맵이 설정 안 됨' 상태가 되던 것 방지)
+    3) 맵이 설정된 뒤 POST /chassis/pose 로 포즈 복원
+    반환: current-map 이 정상 설정되면 True.
+    """
+    import time as _time
+    headers = {"Authorization": f"Secret {secret}"}
+    saved = _read_tracked_pose(robot_ip)
+
+    def _current_id():
+        try:
+            r = http_requests.get(
+                f"http://{robot_ip}:8090/chassis/current-map",
+                headers=headers, timeout=8,
+            )
+            if r.status_code == 200:
+                return r.json().get("id")
+        except Exception:
+            pass
         return None
+
+    ok = False
+    for attempt in range(3):
+        try:
+            http_requests.post(
+                f"http://{robot_ip}:8090/chassis/current-map",
+                headers=headers, json={"map_id": map_id}, timeout=timeout,
+            )
+        except Exception as e:
+            logger.warning(f"[sync] current-map 설정 요청 실패 ({robot_ip}) 시도 {attempt+1}: {e}")
+        # 실제 반영 확인 (최대 ~6초 폴링)
+        deadline = _time.time() + 6
+        while _time.time() < deadline:
+            if _current_id() == map_id:
+                ok = True
+                break
+            _time.sleep(1.0)
+        if ok:
+            break
+        logger.warning(f"[sync] current-map 미설정 — 재시도 {attempt+1}/3 (map_id={map_id}, {robot_ip})")
+    if not ok:
+        logger.error(f"[sync] current-map 설정 실패(3회) — map_id={map_id} ({robot_ip})")
+
+    # 포즈 복원 (맵이 설정된 뒤에)
+    if not saved:
+        logger.warning(f"[sync] 포즈 저장 실패 → 복원 생략 ({robot_ip}) — 위치가 리셋될 수 있음")
+        return ok
+    try:
+        _time.sleep(1.0)
+        http_requests.post(
+            f"http://{robot_ip}:8090/chassis/pose",
+            headers=headers, json=saved, timeout=5,
+        )
+        logger.info(f"[sync] 포즈 복원 완료 ({robot_ip}): pos={saved['position'][:2]} ori={saved['ori']:.3f}")
+    except Exception as e:
+        logger.warning(f"[sync] 포즈 복원 실패 ({robot_ip}): {e}")
+    return ok
 
 
 @router.post("/maps/save", status_code=201)
 def api_save_map(body: dict, db: Session = Depends(get_db)):
     """매핑 종료 후 결과를 DB에 저장.
     이미지·맵 데이터를 로봇에서 다운로드하여 로컬 서버에 저장한 뒤 경로를 DB에 기록."""
-    # 로봇 secret 조회 (download_url에 필요)
+    # ── 유동 IP 대응: 결과 URL 의 host 를 '현재 로봇 IP' 로 치환 ──
+    # 매핑 결과 URL(image_url 등)에는 매핑 당시 IP 가 박혀 있어, IP 가 바뀌면 다운로드가 실패한다.
+    # robot_sn 으로 DB 에서 현재 IP 를 찾아 URL host 를 교체한다.
+    cur_robot_ip = None
+    robot_sn = body.get("robot_sn")
+    if robot_sn:
+        r = db.query(Robot).filter(Robot.serial_number == robot_sn).first()
+        if r and r.ip_address:
+            cur_robot_ip = r.ip_address
     robot_secret = None
-    robot_ip = None
+    if cur_robot_ip:
+        for _k in ("image_url", "thumbnail_url", "download_url", "bag_url", "trajectories_url"):
+            if body.get(_k):
+                body[_k] = _replace_url_host(body[_k], cur_robot_ip)
+        robot_secret = _find_secret(cur_robot_ip)
+        logger.info(f"[save_map] 결과 URL host 를 현재 로봇 IP({cur_robot_ip}) 로 치환")
+
+    # 로봇 secret 조회 (치환 못 했으면 download_url 의 host 로 폴백)
+    robot_ip = cur_robot_ip
     download_url = body.get("download_url")
-    if download_url:
+    if robot_secret is None and download_url:
         try:
             from urllib.parse import urlparse
             robot_ip = urlparse(download_url).hostname
@@ -574,12 +733,12 @@ def api_save_map(body: dict, db: Session = Depends(get_db)):
 
     # 로봇 URL → 로컬 서버 파일로 다운로드
     if body.get("image_url"):
-        local_path = _download_robot_image(body["image_url"], "map_img")
+        local_path = _download_robot_image(body["image_url"], "map_img", robot_secret)
         if local_path:
             body["image_url"] = local_path
 
     if body.get("thumbnail_url"):
-        local_path = _download_robot_image(body["thumbnail_url"], "map_thumb")
+        local_path = _download_robot_image(body["thumbnail_url"], "map_thumb", robot_secret)
         if local_path:
             body["thumbnail_url"] = local_path
 
@@ -1117,21 +1276,29 @@ def api_sync_map_to_robot(map_id: int, body: dict, db: Session = Depends(get_db)
                 f"carto_map: {len(mapping_data.get('carto_map', ''))}자, "
                 f"오버레이: {len(overlay_data.get('features', []))}개")
 
-    # ── 3) jack POI가 있으면 rack.specs 자동 설정 — 로봇 모델명 기준 ──
+    # ── 3) jack/standby POI가 있으면 rack.specs 자동 설정 ──
+    # 우선순위: 맵 POI 에 지정된 rack_size(예: LG_V2) → 없으면 로봇 모델 기본값
     if jack_pois:
         try:
-            # 대상 로봇의 model 조회 → 모델명에서 사이즈(S300/S600) 자동 매칭 → spec 1개
-            from app.constants.rack_specs import build_rack_specs_for_robot_model, spec_name_for_robot_model
+            from app.constants.rack_specs import (
+                build_rack_specs_for_map, build_rack_specs_for_robot_model,
+                collect_rack_sizes_in_map,
+            )
             _target_robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
             _model = _target_robot.model if _target_robot else None
-            _specs_list = build_rack_specs_for_robot_model(_model)
-            _rack_specs = {"rack.specs": _specs_list}
+            _sizes = collect_rack_sizes_in_map(db, map_id)
+            if _sizes:
+                _specs_list = build_rack_specs_for_map(db, map_id)   # 맵 POI 사이즈 기준
+                _src = f"map sizes={sorted(_sizes)}"
+            else:
+                _specs_list = build_rack_specs_for_robot_model(_model)  # 폴백: 로봇 모델
+                _src = f"model={_model}"
             http_requests.patch(
                 f"http://{robot_ip}:8090/system/settings/user",
                 headers={"Authorization": f"Secret {target_secret}"},
-                json=_rack_specs, timeout=5,
+                json={"rack.specs": _specs_list}, timeout=5,
             )
-            logger.info(f"[sync] rack.specs 자동 설정 완료 → {robot_ip} (model={_model}, spec={spec_name_for_robot_model(_model)})")
+            logger.info(f"[sync] rack.specs 설정 완료 → {robot_ip} ({_src}, specs={len(_specs_list)}개)")
         except Exception as e:
             logger.warning(f"[sync] rack.specs 설정 실패: {e}")
 
@@ -1293,12 +1460,8 @@ def _sync_full_from_server(
                             headers={"Authorization": f"Secret {target_secret}"},
                             json={"overlays": new_ov}, timeout=10,
                         )
-                        # current-map 재선택 → overlay 리로드
-                        http_requests.post(
-                            f"http://{target_ip}:8090/chassis/current-map",
-                            headers={"Authorization": f"Secret {target_secret}"},
-                            json={"map_id": _target_map_id}, timeout=10,
-                        )
+                        # current-map 재선택 → overlay 리로드 (포즈 저장/복원해 리셋 방지)
+                        _reselect_current_map_keep_pose(target_ip, target_secret, _target_map_id)
                         logger.info(f"[sync:full] Shelves Point {len(shelves_features)}개 재적용 완료 (맵 {_target_map_id})")
                         return
                     except Exception as ex:
@@ -1515,29 +1678,45 @@ def api_sync_overlays_to_robot(map_id: int, body: dict, db: Session = Depends(ge
     # PATCH → 대상 맵에 overlay 적용 + current-map 재선택
     try:
         patch_map_by_id(robot_ip, target_secret, target_map_id, {"overlays": overlay_json})
-        # current-map 재선택 → 로봇이 overlay 리로드
-        http_requests.post(
-            f"http://{robot_ip}:8090/chassis/current-map",
-            headers={"Authorization": f"Secret {target_secret}"},
-            json={"map_id": target_map_id}, timeout=10,
-        )
+        # current-map 재선택 → 로봇이 overlay 리로드 (포즈는 저장/복원해 리셋 방지)
+        _reselect_current_map_keep_pose(robot_ip, target_secret, target_map_id)
         logger.info(f"[sync-overlays] overlay PATCH + 맵 리로드 완료: {len(merged)}개 features")
+        # 유휴(도킹) 로봇이면 동기화 후 충전소 기준으로 정확히 위치재조정.
+        # 작업 중(활성 워커)인 로봇은 도킹 위치가 아닐 수 있으므로 제외(저장/복원한 포즈 유지).
+        try:
+            from app.services import dispatch_service, boot_recovery
+            _r = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
+            if _r and not dispatch_service.has_active_worker(_r.id):
+                boot_recovery.relocalize_robot_to_dock(_r.id)
+                logger.info(f"[sync-overlays] 유휴 로봇 → 동기화 후 위치재조정 ({robot_ip})")
+        except Exception as e:
+            logger.warning(f"[sync-overlays] 동기화 후 위치재조정 생략: {e}")
     except Exception as e:
         logger.error(f"[sync-overlays] overlay PATCH 실패: {e}")
         raise HTTPException(status_code=500, detail=f"overlay 전송 실패: {e}")
 
-    # jack POI가 있으면 rack.specs 자동 설정
+    # jack/standby POI 가 있으면 rack.specs 자동 설정 (맵 POI rack_size 우선, 없으면 모델)
     if jack_pois:
         try:
-            from app.constants.rack_specs import build_rack_specs_for_robot_model, spec_name_for_robot_model
+            from app.constants.rack_specs import (
+                build_rack_specs_for_map, build_rack_specs_for_robot_model,
+                collect_rack_sizes_in_map,
+            )
             _target_robot = db.query(Robot).filter(Robot.ip_address == robot_ip).first()
             _model = _target_robot.model if _target_robot else None
+            _sizes = collect_rack_sizes_in_map(db, map_id)
+            if _sizes:
+                _specs_list = build_rack_specs_for_map(db, map_id)
+                _src = f"map sizes={sorted(_sizes)}"
+            else:
+                _specs_list = build_rack_specs_for_robot_model(_model)
+                _src = f"model={_model}"
             http_requests.patch(
                 f"http://{robot_ip}:8090/system/settings/user",
                 headers={"Authorization": f"Secret {target_secret}"},
-                json={"rack.specs": build_rack_specs_for_robot_model(_model)}, timeout=5,
+                json={"rack.specs": _specs_list}, timeout=5,
             )
-            logger.info(f"[sync-overlays] rack.specs 자동 설정 완료 → {robot_ip} (model={_model}, spec={spec_name_for_robot_model(_model)})")
+            logger.info(f"[sync-overlays] rack.specs 설정 완료 → {robot_ip} ({_src}, specs={len(_specs_list)}개)")
         except Exception as e:
             logger.warning(f"[sync-overlays] rack.specs 설정 실패: {e}")
 
@@ -1818,10 +1997,11 @@ def api_relocalize_robots(body: dict, db: Session = Depends(get_db)):
             yaw_rad = poi.angle if poi.angle is not None else 0.0
 
             if use_docking_offset:
-                # 충전소: yaw 방향으로 0.9m 앞, 충전소를 바라보는 방향
+                # 충전소: yaw 방향으로 DOCKING_OFFSET 앞에 위치, 헤딩은 충전소 POI 방향 그대로.
+                # (예전엔 yaw+π 로 뒤집었으나 실제 도킹 헤딩과 180° 어긋나 반대로 서던 문제 → 제거)
                 target_x = poi.world_x + DOCKING_OFFSET * math.cos(yaw_rad)
                 target_y = poi.world_y + DOCKING_OFFSET * math.sin(yaw_rad)
-                target_yaw = yaw_rad + math.pi
+                target_yaw = yaw_rad
             else:
                 # 대기지점: 정확한 좌표, POI 각도 그대로
                 target_x = poi.world_x

@@ -26,6 +26,8 @@ from app.schemas.dispatch import (
     DispatchSessionOut, DispatchStatusOut, POIBrief,
     DispatchPOIStatusOut, DispatchCallResult, DispatchCallRequest,
     TabletSlotIn, TabletSlotOut,
+    POIConsoleItem, ConsoleRobotItem, ConsoleStatusOut,
+    DispatchRouteRequest, WaypointBrief, RobotTabletStatus,
 )
 from app.crud import dispatch as dispatch_crud
 from app.services import dispatch_service
@@ -37,6 +39,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/dispatch", tags=["인터랙티브 배차 (VESA)"])
 
 _TABLET_TEMPLATE = Path(__file__).parent.parent / "templates" / "dispatch_tablet.html"
+_CONSOLE_TEMPLATE = Path(__file__).parent.parent / "templates" / "dispatch_console.html"
+_ROBOT_TABLET_TEMPLATE = Path(__file__).parent.parent / "templates" / "dispatch_robot_tablet.html"
 
 
 # ── 헬퍼 ─────────────────────────────────────────────────────
@@ -119,6 +123,45 @@ def _list_available_pois(db: Session, robot_id: Optional[int] = None) -> list[PO
     ]
 
 
+def _current_area_active_pois(db: Session) -> list[POIBrief]:
+    """현재 [메인 적용]된 area의 활성 맵에서 jack POI 목록.
+
+    맵관리에서 적용한 area_id 기준. 다른 층/다른 맵의 POI는 제외한다.
+    (콘솔/슬롯 모두 이 목록을 써서 현재 맵 POI만 노출)
+    """
+    from app.routers import map as map_mod
+    area_id = map_mod._current_area_id
+    if area_id is None:
+        # 파일에서 한번 더 시도 (서버 부팅 직후 등)
+        area_id = map_mod._load_persisted_default_area()
+    if area_id is None:
+        return []
+
+    active_map = (
+        db.query(RobotMap)
+        .filter(RobotMap.area_id == area_id, RobotMap.is_active == True)
+        .order_by(RobotMap.updated_at.desc())
+        .first()
+    )
+    if not active_map:
+        return []
+
+    pois = (
+        db.query(MapPOI)
+        .filter(
+            MapPOI.map_id == active_map.id,
+            MapPOI.is_active == True,
+            MapPOI.poi_type == "jack",
+        )
+        .order_by(MapPOI.name.asc())
+        .all()
+    )
+    return [
+        POIBrief(id=p.id, name=p.name, poi_type=p.poi_type, world_x=p.world_x, world_y=p.world_y)
+        for p in pois
+    ]
+
+
 # ── API ──────────────────────────────────────────────────────
 
 
@@ -153,7 +196,7 @@ def start(body: DispatchStartRequest, db: Session = Depends(get_db)):
     return {"results": results}
 
 
-@router.post("/{robot_id}/next")
+@router.post("/{robot_id:int}/next")
 def next_position(robot_id: int, body: DispatchNextRequest, db: Session = Depends(get_db)):
     # 다른 세션이 점유 중이면 거부
     occupied = dispatch_crud.occupied_poi_ids(db)
@@ -171,7 +214,7 @@ def next_position(robot_id: int, body: DispatchNextRequest, db: Session = Depend
     return {"ok": True}
 
 
-@router.post("/{robot_id}/end")
+@router.post("/{robot_id:int}/end")
 def end(robot_id: int):
     ok, msg = dispatch_service.send_end(robot_id)
     if not ok:
@@ -207,7 +250,7 @@ def status(db: Session = Depends(get_db)):
     )
 
 
-@router.get("/{robot_id}/status", response_model=DispatchSessionOut)
+@router.get("/{robot_id:int}/status", response_model=DispatchSessionOut)
 def robot_status(robot_id: int, db: Session = Depends(get_db)):
     session = dispatch_crud.get_active_session(db, robot_id)
     if not session:
@@ -215,7 +258,7 @@ def robot_status(robot_id: int, db: Session = Depends(get_db)):
     return _session_to_out(session, db)
 
 
-@router.get("/{robot_id}/pois", response_model=list[POIBrief])
+@router.get("/{robot_id:int}/pois", response_model=list[POIBrief])
 def robot_pois(robot_id: int, db: Session = Depends(get_db)):
     """해당 로봇이 갈 수 있는 POI 목록 (자기 area 기준)."""
     return _list_available_pois(db, robot_id=robot_id)
@@ -246,14 +289,9 @@ def _count_available_robots(db: Session) -> int:
     idle_robots = [r for r in robots if not dispatch_service.has_active_worker(r.id)]
     if not idle_robots:
         return 0
-    # 2) 라이브 ONLINE 체크 (배차 선정 로직과 동일)
+    # 2) 라이브 ONLINE 체크 (TTL 캐시 — 배차 선정 로직과 동일)
     try:
-        from app.robot_api.robot_live_service import fetch_all_robots_live
-        from app.routers.robot import DEFAULT_SECRET
-        live = fetch_all_robots_live([
-            {"ip": r.ip_address, "secret": DEFAULT_SECRET} for r in idle_robots
-        ])
-        online_ips = {it.get("IP") for it in live.get("items", []) if it.get("ONLINE") == "Online"}
+        online_ips = dispatch_service.online_ips_cached([r.ip_address for r in idle_robots])
         return sum(1 for r in idle_robots if r.ip_address in online_ips)
     except Exception:
         # 라이브 서비스 자체가 죽었으면 폴백 — 등록된 idle 수 그대로
@@ -274,6 +312,7 @@ def _poi_status(db: Session, poi_id: int) -> DispatchPOIStatusOut:
             DispatchSessionModel.current_poi_id == poi_id,
             or_(
                 DispatchSessionModel.status == "awaiting_next",
+                DispatchSessionModel.status == "awaiting_confirm",
                 and_(
                     DispatchSessionModel.status == "moving",
                     DispatchSessionModel.target_poi_id.is_(None),
@@ -300,6 +339,13 @@ def _poi_status(db: Session, poi_id: int) -> DispatchPOIStatusOut:
         state = "arrived"
     elif heading:
         state = "calling"
+
+    # 예약 상태 (가용 로봇 없어 대기 중) — 로봇이 없을 때만 의미 있음
+    reservation = dispatch_crud.get_waiting_reservation(db, poi_id)
+    reserved = reservation is not None
+    reserved_with_rack = bool(reservation.with_rack) if reservation else None
+    if state == "empty" and reserved:
+        state = "reserved"
 
     robot_id = robot_name = robot_ip = battery = None
     target_id = target_name = None
@@ -330,6 +376,8 @@ def _poi_status(db: Session, poi_id: int) -> DispatchPOIStatusOut:
         poi_id=poi_id,
         poi_name=poi_name,
         state=state,
+        reserved=reserved,
+        reserved_with_rack=reserved_with_rack,
         robot_id=robot_id,
         robot_name=robot_name,
         robot_ip=robot_ip,
@@ -353,19 +401,395 @@ def poi_status(poi_id: int, db: Session = Depends(get_db)):
 def poi_call(poi_id: int, body: DispatchCallRequest | None = None, db: Session = Depends(get_db)):
     """이 POI로 가용 로봇 1대 호출 (배터리 많은 순).
 
+    가용 로봇이 없으면 예약을 생성한다 (reserved=True). 이후 어떤 로봇이
+    작업을 종료해 가용해지면 먼저 예약한 위치부터 자동으로 호출된다.
+
     body.with_rack (기본 True):
       True  → standby에서 렉 픽업 후 이 POI로 이동
       False → 잭 조작 없이 바로 이 POI로 이동
     """
     with_rack = body.with_rack if body is not None else True
-    ok, msg, robot_id = dispatch_service.call_to_poi(poi_id, with_rack=with_rack)
-    robot_name = None
-    if ok and robot_id:
-        r = db.query(Robot).filter(Robot.id == robot_id).first()
-        robot_name = r.name if r else None
+    robot_type = body.robot_type if body is not None else None
+    ok, msg, robot_id, reserved = dispatch_service.call_to_poi(
+        poi_id, robot_type=robot_type, with_rack=with_rack
+    )
     if not ok:
         raise HTTPException(status_code=409, detail=msg)
-    return DispatchCallResult(ok=True, message="ok", robot_id=robot_id, robot_name=robot_name)
+    robot_name = None
+    if robot_id:
+        r = db.query(Robot).filter(Robot.id == robot_id).first()
+        robot_name = r.name if r else None
+    return DispatchCallResult(
+        ok=True,
+        message="reserved" if reserved else "ok",
+        robot_id=robot_id,
+        robot_name=robot_name,
+        reserved=reserved,
+    )
+
+
+@router.delete("/poi/{poi_id}/reserve")
+def poi_cancel_reservation(poi_id: int):
+    """이 위치의 대기 중 예약을 취소."""
+    cancelled = dispatch_service.cancel_reservation_at_poi(poi_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="취소할 예약이 없습니다")
+    return {"ok": True}
+
+
+# ══════════════════════════════════════════════════════════
+# 콘솔 (범용 단말 — 모든 POI를 한 화면에서 호출/예약/제어)
+# ══════════════════════════════════════════════════════════
+
+
+def _available_robot_counts(db: Session) -> dict:
+    """가용 로봇 수를 타입별로 집계 (라이브 ONLINE 체크 1회)."""
+    robots = db.query(Robot).filter(Robot.is_active == True, Robot.ip_address != None).all()
+    idle = [r for r in robots if not dispatch_service.has_active_worker(r.id)]
+    if not idle:
+        return {"total": 0, "lifting": 0, "serving": 0}
+    # 라이브 ONLINE 체크 — TTL 캐시 사용 (폴링마다 수 초 걸리는 것 방지)
+    online_ips = dispatch_service.online_ips_cached([r.ip_address for r in idle])
+    online = [r for r in idle if r.ip_address in online_ips]
+    return {
+        "total": len(online),
+        "lifting": sum(1 for r in online if (r.robot_type or "lifting") == "lifting"),
+        "serving": sum(1 for r in online if r.robot_type == "serving"),
+    }
+
+
+def _console_status(db: Session) -> ConsoleStatusOut:
+    """모든 작업 POI(jack)의 상태를 한 번에 집계. (콘솔 폴링용)
+
+    POI별 상태 계산은 _poi_status 와 동일 규칙이되, 세션/로봇/예약을 일괄
+    조회해 N+1 쿼리를 피한다.
+    """
+    pois = _current_area_active_pois(db)  # 현재 적용 area의 활성 맵 jack POI만
+
+    sessions = (
+        db.query(DispatchSessionModel)
+        .filter(DispatchSessionModel.status.notin_(("completed", "failed")))
+        .all()
+    )
+    arrived_by_poi: dict[int, DispatchSessionModel] = {}
+    heading_by_poi: dict[int, DispatchSessionModel] = {}
+    for s in sessions:
+        if s.current_poi_id and (
+            s.status == "awaiting_next"
+            or s.status == "awaiting_confirm"
+            or (s.status == "moving" and s.target_poi_id is None)
+        ):
+            arrived_by_poi[s.current_poi_id] = s
+        if s.target_poi_id and s.status in ("starting", "picking_up", "moving"):
+            heading_by_poi[s.target_poi_id] = s
+
+    reservations = {r.poi_id: r for r in dispatch_crud.list_waiting_reservations(db)}
+    occupied = sorted(dispatch_crud.occupied_poi_ids(db))
+    poi_name_by_id = {p.id: p.name for p in pois}
+
+    # "경유지 예약" 배지용 집합 — 미래 목적지(이동 목표 target + 아직 안 간 경유지)만.
+    # 로봇이 떠나는 중인 current_poi_id 는 제외 → 출발지가 잘못 "예약"으로 뜨는 것 방지.
+    from app.models.dispatch import DispatchWaypoint as _DWp
+    reserved_ids: set[int] = set()
+    for s in sessions:
+        if s.target_poi_id:
+            reserved_ids.add(s.target_poi_id)
+    _sids = [s.id for s in sessions]
+    if _sids:
+        for (pid,) in (
+            db.query(_DWp.poi_id)
+            .filter(_DWp.session_id.in_(_sids), _DWp.status.in_(("pending", "current")))
+            .all()
+        ):
+            if pid:
+                reserved_ids.add(pid)
+
+    robot_ids = {s.robot_id for s in sessions if s.robot_id}
+    robots: dict[int, Robot] = {}
+    statuses: dict[int, RobotStatus] = {}
+    if robot_ids:
+        robots = {r.id: r for r in db.query(Robot).filter(Robot.id.in_(robot_ids)).all()}
+        statuses = {
+            st.robot_id: st
+            for st in db.query(RobotStatus).filter(RobotStatus.robot_id.in_(robot_ids)).all()
+        }
+
+    items: list[POIConsoleItem] = []
+    for p in pois:
+        arrived = arrived_by_poi.get(p.id)
+        heading = heading_by_poi.get(p.id)
+        session = arrived or heading
+
+        state = "empty"
+        if arrived:
+            state = "arrived"
+        elif heading:
+            state = "calling"
+
+        reservation = reservations.get(p.id)
+        reserved = reservation is not None
+        reserved_with_rack = bool(reservation.with_rack) if reservation else None
+        if state == "empty" and reserved:
+            state = "reserved"
+
+        robot_id = robot_name = robot_ip = battery = None
+        with_rack_val = session_status = target_id = target_name = None
+        can_confirm = False
+        next_poi_name = None
+        is_last = False
+        if session:
+            session_status = session.status
+            with_rack_val = bool(session.with_rack) if session.with_rack is not None else True
+            target_id = session.target_poi_id
+            target_name = poi_name_by_id.get(target_id) if target_id else None
+            r = robots.get(session.robot_id)
+            if r:
+                robot_id = r.id
+                robot_name = r.name
+                robot_ip = r.ip_address
+                st = statuses.get(r.id)
+                if st:
+                    battery = st.battery_level
+            # 경유지 진행 중이면 콘솔에서도 [확인] 가능 — 다음 경유지/마지막 여부 계산
+            if session.status == "awaiting_confirm":
+                can_confirm = True
+                wps = dispatch_crud.list_waypoints(db, session.id)
+                cur_seq = next((w.seq for w in wps if w.status == "current"), None)
+                nxt = next(
+                    (w for w in wps if w.status == "pending"
+                     and (cur_seq is None or w.seq > cur_seq)),
+                    None,
+                )
+                if nxt:
+                    next_poi_name = poi_name_by_id.get(nxt.poi_id)
+                    # 콘솔 POI 목록에 없는(다른 층) 이름 폴백
+                    if next_poi_name is None and nxt.poi_id:
+                        _np = db.query(MapPOI).filter(MapPOI.id == nxt.poi_id).first()
+                        next_poi_name = _np.name if _np else None
+                else:
+                    is_last = True
+
+        items.append(POIConsoleItem(
+            poi_id=p.id, poi_name=p.name, state=state,
+            robot_id=robot_id, robot_name=robot_name, robot_ip=robot_ip,
+            robot_battery=battery, with_rack=with_rack_val,
+            session_status=session_status, target_poi_id=target_id,
+            target_poi_name=target_name,
+            reserved=reserved, reserved_with_rack=reserved_with_rack,
+            can_confirm=can_confirm, next_poi_name=next_poi_name, is_last=is_last,
+        ))
+
+    counts = _available_robot_counts(db)
+    robot_items = _console_robot_items(db, sessions, poi_name_by_id)
+    return ConsoleStatusOut(
+        pois=items,
+        robots=robot_items,
+        occupied_poi_ids=occupied,
+        reserved_poi_ids=sorted(reserved_ids),
+        available_robot_count=counts["total"],
+        available_lifting_count=counts["lifting"],
+        available_serving_count=counts["serving"],
+    )
+
+
+def _console_robot_items(db: Session, sessions: list, poi_name_by_id: dict) -> list[ConsoleRobotItem]:
+    """콘솔 사이드바용 로봇 목록 — 등록된 활성 로봇 전체 + 상태/배터리/원격제어 IP.
+
+    online 판정은 배차 선정과 동일한 라이브 TTL 캐시를 재사용한다.
+    """
+    robots = (
+        db.query(Robot)
+        .filter(Robot.is_active == True)
+        .order_by(Robot.name.asc())
+        .all()
+    )
+    if not robots:
+        return []
+
+    ips = [r.ip_address for r in robots if r.ip_address]
+    try:
+        online_ips = dispatch_service.online_ips_cached(ips)
+    except Exception:
+        online_ips = set(ips)  # 라이브 서비스 장애 시 온라인 취급
+
+    # 배터리 일괄 조회
+    ids = [r.id for r in robots]
+    statuses = {
+        st.robot_id: st
+        for st in db.query(RobotStatus).filter(RobotStatus.robot_id.in_(ids)).all()
+    } if ids else {}
+    # 로봇별 현재 세션 (진행 상태/위치 요약)
+    session_by_robot = {s.robot_id: s for s in sessions if s.robot_id}
+
+    out: list[ConsoleRobotItem] = []
+    for r in robots:
+        st = statuses.get(r.id)
+        sess = session_by_robot.get(r.id)
+        cur_name = None
+        if sess:
+            cur = sess.current_poi_id or sess.target_poi_id
+            cur_name = poi_name_by_id.get(cur) if cur else None
+        out.append(ConsoleRobotItem(
+            robot_id=r.id,
+            robot_name=r.name,
+            robot_ip=r.ip_address,
+            robot_type=r.robot_type or "lifting",
+            online=(r.ip_address in online_ips) if r.ip_address else False,
+            battery=st.battery_level if st else None,
+            busy=dispatch_service.has_active_worker(r.id),
+            session_status=sess.status if sess else None,
+            current_poi_name=cur_name,
+        ))
+    return out
+
+
+@router.get("/console/status", response_model=ConsoleStatusOut)
+def console_status(db: Session = Depends(get_db)):
+    """콘솔 폴링 — 모든 POI 상태 + 점유 목록 + 가용 로봇 수."""
+    return _console_status(db)
+
+
+@router.get("/console", response_class=HTMLResponse)
+def console_page():
+    """범용 콘솔 페이지 (모든 POI를 한 화면에서 호출/예약/다음/종료)."""
+    if not _CONSOLE_TEMPLATE.exists():
+        return HTMLResponse(content="<h1>console template not found</h1>", status_code=500)
+    return HTMLResponse(content=_CONSOLE_TEMPLATE.read_text(encoding="utf-8"))
+
+
+# ══════════════════════════════════════════════════════════
+# 경유지 경로 + 로봇 부착 태블릿
+# ══════════════════════════════════════════════════════════
+
+
+@router.post("/poi/{poi_id:int}/route")
+def poi_route(poi_id: int, body: DispatchRouteRequest, db: Session = Depends(get_db)):
+    """이 위치에 도착한 로봇에 경유지 경로(순서)를 등록하고 출발시킨다.
+
+    이후 각 경유지 도착마다 로봇 부착 태블릿의 [확인]으로 다음 진행, 마지막 확인 후 자동 종료.
+    """
+    session = dispatch_service.get_session_at_poi(poi_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="이 위치에 대기 중인 로봇이 없습니다")
+    if not body.waypoints:
+        raise HTTPException(status_code=400, detail="경유지를 1개 이상 지정하세요")
+
+    # 입력 정리: 출발 위치 자신 제외 + 중복 제거(순서 유지)
+    # (같은 곳을 연속 방문하거나 제자리 이동하는 비정상 동작 방지)
+    seen: set[int] = set()
+    waypoints: list[int] = []
+    for w in body.waypoints:
+        if w == poi_id or w in seen:
+            continue
+        seen.add(w)
+        waypoints.append(w)
+    if not waypoints:
+        raise HTTPException(
+            status_code=400,
+            detail="유효한 경유지가 없습니다 (출발 위치이거나 중복만 지정됨)",
+        )
+
+    # 점유 검증: 경유지가 다른 로봇 점유 POI면 거부
+    occupied = dispatch_crud.occupied_poi_ids(db)
+    occupied.discard(poi_id)  # 자기 현재 위치
+    for wp in dispatch_crud.list_waypoints(db, session.id):
+        if wp.poi_id:
+            occupied.discard(wp.poi_id)  # 자기 세션의 기존 경유지(새 경로로 덮어씀)
+    conflict = sorted({w for w in waypoints if w in occupied})
+    if conflict:
+        raise HTTPException(status_code=409, detail=f"점유 중인 경유지가 있습니다: {conflict}")
+
+    ok, msg = dispatch_service.send_route(session.robot_id, waypoints)
+    if not ok:
+        raise HTTPException(status_code=409, detail=msg)
+    return {"ok": True, "robot_id": session.robot_id}
+
+
+def _robot_tablet_status(db: Session, robot_id: int) -> RobotTabletStatus:
+    robot = db.query(Robot).filter(Robot.id == robot_id).first()
+    robot_name = robot.name if robot else None
+
+    session = dispatch_crud.get_active_session(db, robot_id)
+    if not session:
+        return RobotTabletStatus(robot_id=robot_id, robot_name=robot_name, active=False)
+
+    wps = dispatch_crud.list_waypoints(db, session.id)
+    poi_ids = {w.poi_id for w in wps if w.poi_id}
+    if session.current_poi_id:
+        poi_ids.add(session.current_poi_id)
+    poi_names: dict[int, str] = {}
+    if poi_ids:
+        for p in db.query(MapPOI).filter(MapPOI.id.in_(poi_ids)).all():
+            poi_names[p.id] = p.name
+
+    current_poi_id = session.current_poi_id
+    current_poi_name = poi_names.get(current_poi_id) if current_poi_id else None
+
+    # 현재 진행 중(current) 경유지의 다음 pending = [확인] 시 갈 곳
+    cur_seq = next((w.seq for w in wps if w.status == "current"), None)
+    next_wp = next(
+        (w for w in wps if w.status == "pending" and (cur_seq is None or w.seq > cur_seq)),
+        None,
+    )
+    next_poi_id = next_wp.poi_id if next_wp else None
+    next_poi_name = poi_names.get(next_poi_id) if next_poi_id else None
+
+    can_confirm = (session.status == "awaiting_confirm")
+    is_last = can_confirm and next_wp is None
+
+    return RobotTabletStatus(
+        robot_id=robot_id,
+        robot_name=robot_name,
+        active=True,
+        session_status=session.status,
+        current_poi_id=current_poi_id,
+        current_poi_name=current_poi_name,
+        next_poi_id=next_poi_id,
+        next_poi_name=next_poi_name,
+        is_last=is_last,
+        can_confirm=can_confirm,
+        waypoints=[
+            WaypointBrief(seq=w.seq, poi_id=w.poi_id,
+                          poi_name=poi_names.get(w.poi_id), status=w.status)
+            for w in wps
+        ],
+    )
+
+
+@router.get("/robot/{robot_id:int}/tablet-status", response_model=RobotTabletStatus)
+def robot_tablet_status(robot_id: int, db: Session = Depends(get_db)):
+    """로봇 부착 태블릿 폴링 — 현재/다음 경유지 + 확인 가능 여부."""
+    return _robot_tablet_status(db, robot_id)
+
+
+@router.post("/robot/{robot_id:int}/confirm")
+def robot_confirm(robot_id: int):
+    """로봇 부착 태블릿 [확인] — 다음 경유지로 진행 (마지막이면 종료로)."""
+    ok, msg = dispatch_service.send_confirm(robot_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail=msg)
+    return {"ok": True}
+
+
+@router.post("/robot/{robot_id:int}/end")
+def robot_end(robot_id: int):
+    """로봇 부착 태블릿 [작업 종료] — 즉시 종료 시퀀스(복귀+충전소)."""
+    ok, msg = dispatch_service.send_end(robot_id)
+    if not ok:
+        raise HTTPException(status_code=409, detail=msg)
+    return {"ok": True}
+
+
+@router.get("/robot-tablet/{robot_id:int}", response_class=HTMLResponse)
+def robot_tablet_page(robot_id: int, db: Session = Depends(get_db)):
+    """로봇 부착 태블릿 페이지 (현재/다음 경유지 + [확인]/[종료])."""
+    if not _ROBOT_TABLET_TEMPLATE.exists():
+        return HTMLResponse(content="<h1>robot tablet template not found</h1>", status_code=500)
+    robot = db.query(Robot).filter(Robot.id == robot_id).first()
+    html = _ROBOT_TABLET_TEMPLATE.read_text(encoding="utf-8")
+    html = html.replace("{{ROBOT_ID}}", str(robot_id))
+    html = html.replace("{{ROBOT_NAME}}", (robot.name if robot else f"로봇 #{robot_id}"))
+    return HTMLResponse(content=html)
 
 
 @router.post("/poi/{poi_id}/next")
@@ -465,39 +889,7 @@ def slots_available_pois(db: Session = Depends(get_db)):
 
     주의: /slots/{slot_number}보다 먼저 정의돼야 한다 (FastAPI 라우팅 순서).
     """
-    # map 라우터 모듈에서 현재 적용된 area_id 가져오기 (변경 추적 위해 모듈 속성 접근)
-    from app.routers import map as map_mod
-    area_id = map_mod._current_area_id
-    if area_id is None:
-        # 파일에서 한번 더 시도 (서버 부팅 직후 등)
-        area_id = map_mod._load_persisted_default_area()
-    if area_id is None:
-        return []
-
-    active_map = (
-        db.query(RobotMap)
-        .filter(RobotMap.area_id == area_id, RobotMap.is_active == True)
-        .order_by(RobotMap.updated_at.desc())
-        .first()
-    )
-    if not active_map:
-        return []
-
-    pois = (
-        db.query(MapPOI)
-        .filter(
-            MapPOI.map_id == active_map.id,
-            MapPOI.is_active == True,
-            MapPOI.poi_type == "jack",
-        )
-        .order_by(MapPOI.name.asc())
-        .all()
-    )
-    return [
-        POIBrief(id=p.id, name=p.name, poi_type=p.poi_type,
-                 world_x=p.world_x, world_y=p.world_y)
-        for p in pois
-    ]
+    return _current_area_active_pois(db)
 
 
 @router.get("/slots/{slot_number}", response_model=TabletSlotOut)

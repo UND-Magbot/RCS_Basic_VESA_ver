@@ -18,6 +18,7 @@ from app.crud.activity_log import log_activity
 from app.services.jack_service import (
     robot_get, robot_patch, run_jack_job, cancel_current_move,
 )
+from app.services import rack_detect_service
 
 logger = logging.getLogger(__name__)
 
@@ -179,3 +180,35 @@ def api_get_robot_user_settings(robot_ip: str):
         return robot_get(robot_ip, "/system/settings/user")
     except requests.RequestException as e:
         raise HTTPException(502, f"로봇 통신 실패 ({robot_ip}): {e}")
+
+
+# ── 랙 사이즈 자동 감지 ──
+# 흐름: start → (로봇을 랙 아래로 천천히 이동) → status 로 확인 → stop 으로 치수 확정
+#      → 그 값을 PATCH /rack-specs/{robot_ip} 로 등록
+
+@router.post("/rack-detect/{robot_ip}/start")
+def api_rack_detect_start(robot_ip: str, duration_sec: int = 60):
+    """랙 크기 감지 시작 (라이다로 폭/깊이 측정).
+
+    호출 후 로봇을 랙 아래로 천천히 이동시키면 측정값이 쌓인다.
+    """
+    try:
+        return rack_detect_service.start(robot_ip, duration_sec=duration_sec)
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+
+
+@router.get("/rack-detect/{robot_ip}/status")
+def api_rack_detect_status(robot_ip: str):
+    """진행 중인 감지의 현재 측정값 (중앙값 + 범위)."""
+    return rack_detect_service.status(robot_ip)
+
+
+@router.post("/rack-detect/{robot_ip}/stop")
+def api_rack_detect_stop(robot_ip: str):
+    """감지 중지 + 최종 측정값 반환.
+
+    반환된 width/depth 를 실측치와 대조한 뒤 rack.specs 에 등록할 것.
+    (제조사 안내: 수동 실측이 더 정확하므로 자동 감지는 보조 수단)
+    """
+    return rack_detect_service.stop(robot_ip)

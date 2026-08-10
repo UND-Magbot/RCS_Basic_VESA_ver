@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>배차 콘솔</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+      background: #11151c; color: #e6eaf2; display: flex; flex-direction: column; height: 100vh;
+    }
+    header {
+      display: flex; align-items: center; gap: 16px;
+      padding: clamp(10px, 1.4vw, 14px) clamp(12px, 2vw, 20px);
+      background: #161b24; border-bottom: 1px solid #232b38;
+    }
+    header h1 { font-size: clamp(16px, 2.2vw, 22px); margin: 0; flex: 1; }
+    .robots-badge {
+      font-size: clamp(12px, 1.5vw, 16px); background: #1e3a5a; color: #6db5ff;
+      padding: 6px 14px; border-radius: 999px; font-weight: 600; white-space: nowrap;
+    }
+    .robots-badge.zero { background: #4d2a1e; color: #ffa46d; }
+
+    .content { flex: 1; display: flex; min-height: 0; }
+    main { flex: 1; overflow-y: auto; padding: clamp(10px, 1.6vw, 18px); }
+
+    /* 로봇 사이드바 */
+    aside.sidebar {
+      width: clamp(190px, 24vw, 300px); flex-shrink: 0;
+      background: #131922; border-left: 1px solid #232b38;
+      overflow-y: auto; padding: clamp(10px, 1.4vw, 16px);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .sidebar-title {
+      font-size: clamp(13px, 1.6vw, 16px); font-weight: 700; color: #9fb0c8;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .robot-card {
+      background: #1a212c; border: 1px solid #232b38; border-radius: 12px;
+      padding: clamp(10px, 1.3vw, 14px); display: flex; flex-direction: column; gap: 9px;
+    }
+    .robot-card.offline { opacity: 0.55; }
+    .robot-card-head { display: flex; align-items: center; gap: 8px; }
+    .robot-dot { width: 9px; height: 9px; border-radius: 50%; background: #4a5568; flex-shrink: 0; }
+    .robot-dot.on { background: #35d07f; box-shadow: 0 0 6px #35d07f88; }
+    .robot-card-name { font-size: clamp(14px, 1.7vw, 17px); font-weight: 700; flex: 1; }
+    .robot-card-row { display: flex; align-items: center; justify-content: space-between; font-size: clamp(11px, 1.3vw, 14px); }
+    .robot-batt-big { font-weight: 700; }
+    .robot-batt-big.low { color: #ffa46d; }
+    .robot-state-pill {
+      font-size: clamp(10px, 1.1vw, 12px); padding: 2px 8px; border-radius: 999px;
+      background: #2b323e; color: #8a93a6; white-space: nowrap;
+    }
+    .robot-state-pill.busy { background: #1e3a5a; color: #6db5ff; }
+    .robot-state-pill.idle { background: #1e4d33; color: #6dd99b; }
+    .btn-control {
+      background: #2a3343; color: #cfe0ff; border: 1px solid #34405a; border-radius: 9px;
+      padding: 10px; font-size: clamp(12px, 1.5vw, 15px); font-weight: 700; cursor: pointer; width: 100%;
+    }
+    .btn-control:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-control:active:not(:disabled) { transform: scale(0.98); }
+
+    /* 원격제어 모달 */
+    .remote { max-width: 520px; }
+    .remote h2 { display: flex; align-items: center; justify-content: space-between; }
+    .remote-close { background: none; border: none; color: #8a93a6; font-size: 22px; cursor: pointer; }
+    .rc-section { margin-top: 14px; }
+    .rc-section h4 { margin: 0 0 8px; font-size: 13px; color: #9fb0c8; font-weight: 600; }
+    .rc-mode-btns { display: flex; gap: 8px; }
+    .rc-mode-btn { flex: 1; background: #232b38; color: #9fb0c8; border: 1px solid #2c3543; border-radius: 9px; padding: 12px; font-size: 15px; font-weight: 700; cursor: pointer; }
+    .rc-mode-btn.active { background: #2f6fff; color: #fff; border-color: #2f6fff; }
+    .rc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .rc-action { background: #1f2733; color: #cfe0ff; border: 1px solid #34405a; border-radius: 9px; padding: 14px 10px; font-size: 15px; font-weight: 700; cursor: pointer; }
+    .rc-action:active { transform: scale(0.97); }
+    .rc-action.up { background: #16351f; border-color: #1e6e44; color: #6dd99b; }
+    .rc-action.down { background: #35211b; border-color: #7a3b2b; color: #ffb08a; }
+    .rc-action.danger { border-color: #7a2b35; color: #ff8a9c; }
+    .dpad { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+    .dpad-row { display: flex; gap: 8px; }
+    .dpad-btn {
+      width: clamp(72px, 20vw, 96px); height: clamp(60px, 12vh, 82px);
+      background: #233044; color: #e6eaf2; border: 1px solid #34405a; border-radius: 12px;
+      font-size: 20px; font-weight: 700; cursor: pointer; line-height: 1.1;
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      touch-action: none; user-select: none;
+    }
+    .dpad-btn span { font-size: 11px; color: #9fb0c8; }
+    .dpad-btn:active { background: #2f6fff; }
+    .dpad-btn.stop { background: #3a2530; }
+    .dpad-spacer { width: clamp(72px, 20vw, 96px); }
+    .rc-status { margin-top: 12px; text-align: center; color: #6db5ff; font-size: 14px; min-height: 18px; }
+    .grid {
+      display: grid;
+      gap: clamp(8px, 1.2vw, 16px);
+      /* 화면폭에 맞춰 열 수 자동 + 타일 최소폭도 화면 따라 유동 (아주 좁으면 1열) */
+      grid-template-columns: repeat(auto-fill, minmax(min(100%, clamp(150px, 20vw, 240px)), 1fr));
+    }
+
+    .tile {
+      border-radius: 14px;
+      padding: clamp(10px, 1.6vw, 18px);
+      min-height: clamp(120px, 17vh, 175px);
+      display: flex; flex-direction: column; gap: clamp(7px, 1.1vh, 13px);
+      background: #1a212c; border: 2px solid #232b38;
+    }
+    .tile.state-empty    { border-color: #2b323e; }
+    .tile.state-reserved { border-color: #6b5320; background: #211d12; }
+    .tile.state-calling  { border-color: #245187; background: #121a26; }
+    .tile.state-arrived  { border-color: #1e6e44; background: #10211a; }
+
+    .tile-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .tile-name { font-size: clamp(15px, 2vw, 22px); font-weight: 700; }
+    .tile-badge { font-size: clamp(10px, 1.2vw, 13px); padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+    .state-empty    .tile-badge { background: #2b323e; color: #8a93a6; }
+    .state-reserved .tile-badge { background: #4a3a1e; color: #ffd36d; }
+    .state-calling  .tile-badge { background: #1e3a5a; color: #6db5ff; }
+    .state-arrived  .tile-badge { background: #1e4d33; color: #6dd99b; }
+
+    .tile-body { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 10px; }
+    .robot-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .robot-name { font-size: clamp(14px, 1.9vw, 19px); font-weight: 600; }
+    .robot-batt { font-size: clamp(12px, 1.5vw, 16px); color: #9fb0c8; }
+    .sub { font-size: clamp(11px, 1.3vw, 14px); color: #8a93a6; }
+
+    .btn {
+      border: none; border-radius: 10px;
+      padding: clamp(9px, 1.4vh, 14px); font-size: clamp(13px, 1.7vw, 18px); font-weight: 600;
+      color: #fff; cursor: pointer; width: 100%;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-call   { background: #2f6fff; }
+    .btn-reserve{ background: #b9852b; }
+    .btn-cancel { background: #4a5568; }
+    .btn-next   { background: #2f8f5a; }
+    .btn-end    { background: #c0392b; }
+    .btn-ghost  { background: #2a3343; }
+    .btn-row { display: flex; gap: 8px; }
+    .btn-row .btn { flex: 1; }
+
+    .empty-state { color: #8a93a6; text-align: center; padding: 40px; font-size: 16px; }
+
+    /* 모달 */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: none; align-items: center; justify-content: center; padding: 20px; z-index: 50;
+    }
+    .modal-overlay.show { display: flex; }
+    .modal {
+      background: #1a212c; border: 1px solid #2c3543; border-radius: 16px;
+      padding: 22px; width: 100%; max-width: 480px; max-height: 80vh; overflow-y: auto;
+    }
+    .modal h2 { margin: 0 0 16px; font-size: 19px; }
+    .modal .modal-actions { margin-top: 16px; }
+    .poi-pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, clamp(100px, 16vw, 130px)), 1fr)); gap: 10px; }
+    .poi-pick {
+      background: #233044; border: none; color: #e6eaf2; border-radius: 10px;
+      padding: clamp(12px, 1.6vh, 16px) 10px; font-size: clamp(13px, 1.7vw, 17px); font-weight: 600; cursor: pointer;
+    }
+    .poi-pick:active { transform: scale(0.97); }
+    .poi-pick.selected { background: #2f6fff; color: #fff; }
+    .poi-pick .ord {
+      display: inline-block; background: #fff; color: #2f6fff; border-radius: 999px;
+      width: 20px; height: 20px; line-height: 20px; font-size: 12px; font-weight: 700; margin-right: 6px;
+    }
+    .route-selected { font-size: clamp(13px, 1.6vw, 15px); color: #9fb0c8; margin-bottom: 10px; min-height: 20px; }
+
+    /* 토스트 */
+    #toast {
+      position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+      background: #2c3543; color: #fff; padding: 12px 20px; border-radius: 10px;
+      font-size: 15px; opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 80;
+      max-width: 90vw; text-align: center;
+    }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>배차 콘솔</h1>
+    <span class="robots-badge" id="robots-badge">가용 로봇 -</span>
+  </header>
+  <div class="content">
+    <main>
+      <div class="grid" id="grid"></div>
+    </main>
+    <aside class="sidebar">
+      <div class="sidebar-title"><span>로봇</span><span id="robot-count" style="font-weight:600;color:#6db5ff"></span></div>
+      <div id="robot-list"></div>
+    </aside>
+  </div>
+
+  <!-- 호출/예약 모달 (로봇 타입별) -->
+  <div class="modal-overlay" id="call-modal">
+    <div class="modal">
+      <h2 id="call-title">로봇 호출</h2>
+      <div class="sub" id="call-hint" style="margin-bottom:14px"></div>
+      <div id="call-buttons" style="display:flex; flex-direction:column; gap:10px"></div>
+      <button class="btn btn-ghost" id="call-cancel" style="margin-top:16px; background:transparent; color:#8a93a6">취소</button>
+    </div>
+  </div>
+
+  <!-- 경유지 등록 모달 -->
+  <div class="modal-overlay" id="route-modal">
+    <div class="modal">
+      <h2 id="route-title">경유지 등록</h2>
+      <div class="sub" style="margin-bottom:10px">갈 순서대로 위치를 누르세요. 다시 누르면 취소됩니다.</div>
+      <div class="route-selected" id="route-selected"></div>
+      <div class="poi-pick-grid" id="route-grid"></div>
+      <div class="modal-actions" style="display:flex; gap:10px; margin-top:14px">
+        <button class="btn btn-next" id="route-start" disabled>출발 (0곳)</button>
+        <button class="btn btn-ghost" id="route-cancel">취소</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 종료 확인 모달 -->
+  <div class="modal-overlay" id="end-modal">
+    <div class="modal">
+      <h2>작업 종료</h2>
+      <div class="sub" id="end-hint" style="margin-bottom:18px"></div>
+      <div class="btn-row">
+        <button class="btn btn-end" id="end-ok">종료</button>
+        <button class="btn btn-ghost" id="end-cancel">취소</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 원격 제어 모달 -->
+  <div class="modal-overlay" id="remote-modal">
+    <div class="modal remote">
+      <h2><span id="remote-title">원격 제어</span><button class="remote-close" id="remote-close">✕</button></h2>
+
+      <div class="rc-section">
+        <div class="rc-mode-btns">
+          <button class="rc-mode-btn active" id="rc-auto">자동 모드</button>
+          <button class="rc-mode-btn" id="rc-remote">원격 모드</button>
+        </div>
+      </div>
+
+      <!-- 자동 모드 패널 -->
+      <div id="rc-panel-auto">
+        <div class="rc-section">
+          <h4>이동 제어</h4>
+          <div class="rc-grid">
+            <button class="rc-action danger" data-rc="stop">작업 정지</button>
+            <button class="rc-action" data-rc="dock">충전소 복귀</button>
+            <button class="rc-action" data-rc="standby">대기장소 복귀</button>
+            <button class="rc-action" data-rc="restart">시스템 재시작</button>
+          </div>
+        </div>
+        <div class="rc-section">
+          <h4>잭 제어</h4>
+          <div class="rc-grid">
+            <button class="rc-action up" data-rc="jack_up">잭 업</button>
+            <button class="rc-action down" data-rc="jack_down">잭 다운</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 원격 모드 패널 -->
+      <div id="rc-panel-remote" style="display:none">
+        <div class="rc-section">
+          <h4>방향 제어 (누르는 동안 이동)</h4>
+          <div class="dpad">
+            <div class="dpad-row">
+              <div class="dpad-spacer"></div>
+              <button class="dpad-btn" data-move="fwd">▲<span>전진</span></button>
+              <div class="dpad-spacer"></div>
+            </div>
+            <div class="dpad-row">
+              <button class="dpad-btn" data-move="left">◀<span>좌회전</span></button>
+              <button class="dpad-btn stop" id="dpad-stop">■<span>정지</span></button>
+              <button class="dpad-btn" data-move="right">▶<span>우회전</span></button>
+            </div>
+            <div class="dpad-row">
+              <div class="dpad-spacer"></div>
+              <button class="dpad-btn" data-move="back">▼<span>후진</span></button>
+              <div class="dpad-spacer"></div>
+            </div>
+          </div>
+        </div>
+        <div class="rc-section">
+          <h4>잭 제어</h4>
+          <div class="rc-grid">
+            <button class="rc-action up" data-rc="jack_up">잭 업</button>
+            <button class="rc-action down" data-rc="jack_down">잭 다운</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 배차 작업 강제 정리 (자동/원격 공통, 로봇 이동 없음) -->
+      <div class="rc-section">
+        <h4>배차 작업</h4>
+        <button class="rc-action danger" id="rc-clear" style="width:100%">작업 강제 종료 (이동 없이 정리)</button>
+      </div>
+
+      <div class="rc-status" id="rc-status"></div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    let data = null;          // 최근 콘솔 상태
+    let pollTimer = null;
+
+    // ── API 헬퍼 ───────────────────────────────────────
+    async function api(url, opts) {
+      const res = await fetch(url, Object.assign({
+        headers: { "Content-Type": "application/json" },
+      }, opts || {}));
+      if (!res.ok) {
+        let msg = res.statusText;
+        try { const j = await res.json(); msg = j.detail || msg; } catch (e) {}
+        throw new Error(msg);
+      }
+      try { return await res.json(); } catch (e) { return {}; }
+    }
+
+    let toastTimer = null;
+    function toast(msg) {
+      const t = document.getElementById("toast");
+      t.textContent = msg;
+      t.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+    }
+
+    function stateLabel(s) {
+      return ({ empty: "비어있음", reserved: "예약됨", calling: "이동 중", arrived: "도착" })[s] || s;
+    }
+    function poiById(id) { return (data && data.pois || []).find(p => p.poi_id === id); }
+
+    // ── 렌더 ───────────────────────────────────────────
+    function render() {
+      if (!data) return;
+      const badge = document.getElementById("robots-badge");
+      badge.textContent = "가용 로봇 " + data.available_robot_count + "대";
+      badge.className = "robots-badge" + (data.available_robot_count === 0 ? " zero" : "");
+
+      renderRobots();
+
+      const grid = document.getElementById("grid");
+      if (!data.pois.length) {
+        grid.innerHTML = '<div class="empty-state">작업 위치(POI)가 없습니다. 맵 관리에서 jack POI를 등록하세요.</div>';
+        return;
+      }
+      grid.innerHTML = data.pois.map(tileHtml).join("");
+    }
+
+    // ── 로봇 사이드바 ──────────────────────────────────
+    function robotStateLabel(r) {
+      if (!r.online) return { txt: "오프라인", cls: "" };
+      if (r.busy) {
+        const m = { starting: "준비", picking_up: "픽업", moving: "이동", awaiting_next: "대기",
+                    awaiting_confirm: "확인대기", returning: "복귀" };
+        return { txt: (m[r.session_status] || "작업중"), cls: "busy" };
+      }
+      return { txt: "대기 (충전소)", cls: "idle" };
+    }
+    function renderRobots() {
+      const list = document.getElementById("robot-list");
+      const cnt = document.getElementById("robot-count");
+      const robots = data.robots || [];
+      const onlineN = robots.filter(r => r.online).length;
+      cnt.textContent = robots.length ? `${onlineN}/${robots.length} 온라인` : "";
+      if (!robots.length) {
+        list.innerHTML = '<div class="sub" style="padding:8px">등록된 로봇이 없습니다</div>';
+        return;
+      }
+      list.innerHTML = robots.map(r => {
+        const s = robotStateLabel(r);
+        const batt = r.battery != null ? r.battery + "%" : "-";
+        const battLow = r.battery != null && r.battery <= 20 ? " low" : "";
+        const loc = r.current_poi_name ? ` · ${r.current_poi_name}` : "";
+        const canControl = r.online && r.robot_ip;
+        return `
+          <div class="robot-card${r.online ? "" : " offline"}">
+            <div class="robot-card-head">
+              <span class="robot-dot${r.online ? " on" : ""}"></span>
+              <span class="robot-card-name">${r.robot_name}</span>
+              <span class="robot-batt-big${battLow}">${batt}</span>
+            </div>
+            <div class="robot-card-row">
+              <span class="robot-state-pill ${s.cls}">${s.txt}${loc}</span>
+            </div>
+            <button class="btn-control" data-ctrl-ip="${r.robot_ip || ""}" data-ctrl-name="${r.robot_name}" ${canControl ? "" : "disabled"}>
+              ${canControl ? "직접 제어" : "오프라인"}
+            </button>
+          </div>`;
+      }).join("");
+    }
+    document.getElementById("robot-list").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-ctrl-ip]");
+      if (!btn || !btn.dataset.ctrlIp) return;
+      openRemoteModal(btn.dataset.ctrlIp, btn.dataset.ctrlName);
+    });
+
+    function tileHtml(p) {
+      const canCall = data.available_robot_count > 0;
+      // 미래 목적지(다음 경유지/이동 목표)로 잡힌 곳만 "경유지 예약"으로 표시.
+      // 출발 중인 로봇의 current 위치(occupied 엔 있지만 reserved 엔 없음)는 제외.
+      const reserved = new Set(data.reserved_poi_ids || []);
+      let body = "";
+      let badgeOverride = null;
+      if (p.state === "empty" && reserved.has(p.poi_id)) {
+        // 로봇은 아직 안 왔지만 어떤 로봇의 다음 경유지로 잡혀 있음 → 호출 불가
+        badgeOverride = "경유지 예약";
+        body = `<div class="sub">로봇의 다음 경유지로<br/>예약된 위치입니다</div>`;
+      } else if (p.state === "empty") {
+        const label = canCall ? "로봇 호출" : "예약하기";
+        const cls = canCall ? "btn-call" : "btn-reserve";
+        body = `<button class="btn ${cls}" data-action="call" data-poi="${p.poi_id}">${label}</button>`;
+      } else if (p.state === "reserved") {
+        const mode = p.reserved_with_rack === false ? "렉 없이" : "렉 포함";
+        body = `
+          <div class="sub">예약됨 · ${mode}<br/>로봇이 생기면 자동 호출</div>
+          <button class="btn btn-cancel" data-action="cancel" data-poi="${p.poi_id}">예약 취소</button>`;
+      } else if (p.state === "calling") {
+        body = `
+          <div class="robot-line">
+            <span class="robot-name">${p.robot_name || "로봇"}</span>
+            <span class="robot-batt">${p.robot_battery != null ? p.robot_battery + "%" : ""}</span>
+          </div>
+          <div class="sub">이 위치로 이동 중…</div>`;
+      } else if (p.state === "arrived") {
+        const mode = p.with_rack === false ? "렉 없이" : "렉 운반";
+        const head = `
+          <div class="robot-line">
+            <span class="robot-name">${p.robot_name || "로봇"}</span>
+            <span class="robot-batt">${p.robot_battery != null ? p.robot_battery + "%" : ""}</span>
+          </div>`;
+        if (p.session_status === "awaiting_confirm") {
+          // 경유지 진행 중 — 로봇 태블릿과 동일하게 콘솔에서도 [확인] 가능
+          const confirmLabel = p.is_last
+            ? "확인 — 작업 종료"
+            : (p.next_poi_name ? `확인 — ${p.next_poi_name}로` : "확인 — 다음 위치로");
+          body = `${head}
+            <div class="sub">${mode} · 경유지 진행 중</div>
+            <button class="btn btn-next" data-action="confirm" data-robot="${p.robot_id}" data-last="${p.is_last ? 1 : 0}" data-poi="${p.poi_id}">${confirmLabel}</button>
+            <button class="btn btn-end" data-action="end" data-poi="${p.poi_id}">종료</button>`;
+        } else {
+          // 호출 위치 도착 — 경유지 등록 대기
+          body = `${head}
+            <div class="sub">${mode} · 경유지 등록 대기</div>
+            <div class="btn-row">
+              <button class="btn btn-next" data-action="route" data-poi="${p.poi_id}">경유지 등록</button>
+              <button class="btn btn-end" data-action="end" data-poi="${p.poi_id}">종료</button>
+            </div>`;
+        }
+      }
+      const tileState = badgeOverride ? "reserved" : p.state;
+      return `
+        <div class="tile state-${tileState}">
+          <div class="tile-head">
+            <span class="tile-name">${p.poi_name}</span>
+            <span class="tile-badge">${badgeOverride || stateLabel(p.state)}</span>
+          </div>
+          <div class="tile-body">${body}</div>
+        </div>`;
+    }
+
+    // ── 액션 (이벤트 위임 — 재렌더에도 1회 바인딩 유지) ──
+    document.getElementById("grid").addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-action]");
+      if (!btn) return;
+      const poiId = parseInt(btn.dataset.poi);
+      const action = btn.dataset.action;
+      if (action === "call") openCallModal(poiId);
+      else if (action === "cancel") cancelReserve(poiId);
+      else if (action === "route") openRouteModal(poiId);
+      else if (action === "end") openEndModal(poiId);
+      else if (action === "confirm") doConfirm(parseInt(btn.dataset.robot), btn.dataset.last === "1", poiId);
+    });
+
+    // ── 콘솔에서 로봇 태블릿 [확인] 대행 ────────────────
+    async function doConfirm(robotId, isLast, poiId) {
+      if (!robotId) return;
+      // 확인 시 로봇은 이 위치를 떠남 → 즉시 비움 (다음 위치는 폴링으로 갱신)
+      patchPoi(poiId, { state: "empty", session_status: null, robot_name: null,
+                        robot_battery: null, reserved: false });
+      pendingActions++;
+      try {
+        await api(`/api/dispatch/robot/${robotId}/confirm`, { method: "POST" });
+        toast(isLast ? "작업을 종료합니다" : "다음 위치로 이동합니다");
+        // 확인은 워커가 비동기로 상태 전이(→moving/returning)함. 즉시 동기화하면 이전 상태로
+        // 롤백되므로, 잠깐 기다렸다 동기화한다 (그동안 폴링은 pendingActions 로 억제).
+        setTimeout(() => { pendingActions--; refresh(true); }, 1000);
+      } catch (e) {
+        toast("확인 실패: " + e.message);
+        pendingActions--;
+        refresh(true);  // 실패 시 즉시 복원
+      }
+    }
+
+    // ── 호출/예약 모달 ─────────────────────────────────
+    let callPoiId = null;
+    function openCallModal(poiId) {
+      callPoiId = poiId;
+      const p = poiById(poiId);
+      const lift = data.available_lifting_count || 0;
+      const serv = data.available_serving_count || 0;
+      const total = data.available_robot_count || 0;
+      document.getElementById("call-title").textContent = p ? p.poi_name : "로봇 호출";
+
+      const cont = document.getElementById("call-buttons");
+      let btns = "", hint = "";
+      if (total === 0) {
+        hint = "가용 로봇이 없습니다. 예약하면 로봇이 작업을 마치는 대로 자동 호출됩니다.";
+        btns = `<button class="btn btn-reserve" data-call="reserve">예약하기</button>`;
+      } else {
+        hint = "부를 로봇 종류를 선택하세요.";
+        if (serv > 0) {
+          btns += `<button class="btn btn-call" data-call="serving" style="background:#7a3fb0">🍽 서빙 호출 — 바로 이동 · ${serv}대</button>`;
+        }
+        if (lift > 0) {
+          btns += `<button class="btn btn-call" data-call="lift-rack">🟦 리프팅 — 렉 포함 · ${lift}대</button>`;
+          btns += `<button class="btn btn-ghost" data-call="lift-norack">⬜ 리프팅 — 렉 없이</button>`;
+        }
+      }
+      document.getElementById("call-hint").textContent = hint;
+      cont.innerHTML = btns;
+      cont.querySelectorAll("[data-call]").forEach(b => {
+        b.onclick = () => {
+          const k = b.dataset.call;
+          if (k === "serving") doCall("serving", false);
+          else if (k === "lift-rack") doCall("lifting", true);
+          else if (k === "lift-norack") doCall("lifting", false);
+          else doCall(null, true);  // reserve
+        };
+      });
+      document.getElementById("call-modal").classList.add("show");
+    }
+    async function doCall(robotType, withRack) {
+      const poiId = callPoiId;
+      document.getElementById("call-modal").classList.remove("show");
+
+      // 낙관적 반영 — 누르는 즉시 화면 전환 (가용 0대면 예약, 아니면 호출)
+      const willReserve = (data.available_robot_count || 0) === 0;
+      patchPoi(poiId, willReserve
+        ? { state: "reserved", reserved: true, reserved_with_rack: !!withRack }
+        : { state: "calling", session_status: "starting", robot_name: null, robot_battery: null });
+
+      pendingActions++;
+      try {
+        const r = await api(`/api/dispatch/poi/${poiId}/call`, {
+          method: "POST",
+          body: JSON.stringify({ robot_type: robotType, with_rack: !!withRack }),
+        });
+        if (r.reserved) {
+          toast("예약되었습니다 — 로봇이 생기면 자동 호출");
+        } else {
+          const label = robotType === "serving"
+            ? "서빙" : (withRack ? "리프팅·렉 포함" : "리프팅·렉 없이");
+          toast(`${r.robot_name || "로봇"} 호출 (${label})`);
+        }
+      } catch (e) {
+        toast("실패: " + e.message);
+      } finally {
+        pendingActions--;
+        refresh(true);  // 실제 상태 동기화 (실패 시 자동 복원)
+      }
+    }
+    document.getElementById("call-cancel").onclick =
+      () => document.getElementById("call-modal").classList.remove("show");
+
+    async function cancelReserve(poiId) {
+      patchPoi(poiId, { state: "empty", reserved: false, reserved_with_rack: null });
+      pendingActions++;
+      try {
+        await api(`/api/dispatch/poi/${poiId}/reserve`, { method: "DELETE" });
+        toast("예약이 취소되었습니다");
+      } catch (e) {
+        toast("취소 실패: " + e.message);
+      } finally {
+        pendingActions--;
+        refresh(true);
+      }
+    }
+
+    // ── 경유지 등록 모달 ───────────────────────────────
+    let routeFromPoi = null;
+    let routeSel = [];  // 선택된 poi_id (갈 순서)
+    function openRouteModal(poiId) {
+      routeFromPoi = poiId;
+      routeSel = [];
+      renderRoutePicker();
+      document.getElementById("route-modal").classList.add("show");
+    }
+    function renderRoutePicker() {
+      const p = poiById(routeFromPoi);
+      document.getElementById("route-title").textContent = `${p ? p.poi_name : ""} → 경유지 등록`;
+      const occupied = new Set(data.occupied_poi_ids || []);
+      const candidates = data.pois.filter(t => t.poi_id !== routeFromPoi && !occupied.has(t.poi_id));
+      const grid = document.getElementById("route-grid");
+      grid.innerHTML = candidates.length
+        ? candidates.map(t => {
+            const order = routeSel.indexOf(t.poi_id);
+            const cls = order >= 0 ? "poi-pick selected" : "poi-pick";
+            const tag = order >= 0 ? `<span class="ord">${order + 1}</span>` : "";
+            return `<button class="${cls}" data-pick="${t.poi_id}">${tag}${t.poi_name}</button>`;
+          }).join("")
+        : '<div class="empty-state">선택 가능한 위치가 없습니다</div>';
+      grid.querySelectorAll("[data-pick]").forEach(b => {
+        b.onclick = () => toggleRoutePick(parseInt(b.dataset.pick));
+      });
+
+      const selDiv = document.getElementById("route-selected");
+      selDiv.innerHTML = routeSel.length
+        ? "순서: " + routeSel.map((id, i) => {
+            const t = poiById(id); return `${i + 1}. ${t ? t.poi_name : id}`;
+          }).join("  →  ")
+        : "";
+
+      const startBtn = document.getElementById("route-start");
+      startBtn.disabled = routeSel.length === 0;
+      startBtn.textContent = `출발 (${routeSel.length}곳)`;
+    }
+    function toggleRoutePick(poiId) {
+      const i = routeSel.indexOf(poiId);
+      if (i >= 0) routeSel.splice(i, 1);
+      else routeSel.push(poiId);
+      renderRoutePicker();
+    }
+    async function doRoute() {
+      if (!routeSel.length) return;
+      const fromPoi = routeFromPoi;
+      const wps = routeSel.slice();
+      document.getElementById("route-modal").classList.remove("show");
+
+      // 낙관적 반영 — 출발지는 비고, 첫 경유지로 이동 중
+      patchPoi(fromPoi, { state: "empty", session_status: null, robot_name: null,
+                          robot_battery: null, reserved: false });
+      patchPoi(wps[0], { state: "calling", session_status: "moving" });
+
+      pendingActions++;
+      try {
+        await api(`/api/dispatch/poi/${fromPoi}/route`, {
+          method: "POST", body: JSON.stringify({ waypoints: wps }),
+        });
+        toast(`경유지 ${wps.length}곳 등록 — 출발`);
+      } catch (e) {
+        toast("출발 실패: " + e.message);
+      } finally {
+        pendingActions--;
+        refresh(true);
+      }
+    }
+    document.getElementById("route-start").onclick = doRoute;
+    document.getElementById("route-cancel").onclick =
+      () => document.getElementById("route-modal").classList.remove("show");
+
+    // ── 종료 모달 ──────────────────────────────────────
+    let endPoiId = null;
+    function openEndModal(poiId) {
+      endPoiId = poiId;
+      const p = poiById(poiId);
+      const withRack = p && p.with_rack !== false;
+      document.getElementById("end-hint").textContent = withRack
+        ? `${p ? p.poi_name : ""}의 로봇을 종료합니다 (대기장소에서 렉 반납 후 충전소 복귀).`
+        : `${p ? p.poi_name : ""}의 로봇을 종료합니다 (충전소 복귀).`;
+      document.getElementById("end-modal").classList.add("show");
+    }
+    async function doEnd() {
+      const poiId = endPoiId;
+      document.getElementById("end-modal").classList.remove("show");
+
+      // 낙관적 반영 — 로봇이 복귀하므로 그 위치는 즉시 비움
+      patchPoi(poiId, { state: "empty", session_status: null, robot_name: null,
+                        robot_battery: null, reserved: false });
+
+      pendingActions++;
+      try {
+        await api(`/api/dispatch/poi/${poiId}/end`, { method: "POST" });
+        toast("작업을 종료합니다");
+      } catch (e) {
+        toast("종료 실패: " + e.message);
+      } finally {
+        pendingActions--;
+        refresh(true);
+      }
+    }
+    document.getElementById("end-ok").onclick = doEnd;
+    document.getElementById("end-cancel").onclick =
+      () => document.getElementById("end-modal").classList.remove("show");
+
+    // ── 원격 제어 모달 (관제와 동일 기능) ──────────────
+    let rcIp = null, rcName = null, rcRemote = false, rcMoving = false, rcTimer = null;
+
+    function rcStatus(msg) {
+      const el = document.getElementById("rc-status");
+      el.textContent = msg;
+      clearTimeout(rcStatus._t);
+      rcStatus._t = setTimeout(() => { el.textContent = ""; }, 3000);
+    }
+    async function rcPost(path, body) {
+      try {
+        const res = await fetch(`/api/robots/remote/${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+        return res.ok;
+      } catch (e) { return false; }
+    }
+
+    function setRcMode(remote) {
+      rcRemote = remote;
+      document.getElementById("rc-auto").classList.toggle("active", !remote);
+      document.getElementById("rc-remote").classList.toggle("active", remote);
+      document.getElementById("rc-panel-auto").style.display = remote ? "none" : "";
+      document.getElementById("rc-panel-remote").style.display = remote ? "" : "none";
+    }
+    async function changeControlMode(mode) {
+      const ok = await rcPost(`control-mode/${rcIp}`, { mode });
+      if (ok) { setRcMode(mode === "remote"); rcStatus(mode === "remote" ? "원격 모드 활성화" : "자동 모드 복귀"); }
+      else rcStatus("모드 전환 실패");
+    }
+
+    function sendTwist(lv, av) { rcPost(`twist/${rcIp}`, { linear_velocity: lv, angular_velocity: av }); }
+    function startMove(lv, av) {
+      rcMoving = true; sendTwist(lv, av);
+      rcTimer = setInterval(() => { if (rcMoving) sendTwist(lv, av); }, 300);
+    }
+    function stopMove() {
+      rcMoving = false;
+      if (rcTimer) { clearInterval(rcTimer); rcTimer = null; }
+      sendTwist(0, 0);
+    }
+
+    function openRemoteModal(ip, name) {
+      rcIp = ip; rcName = name;
+      document.getElementById("remote-title").textContent = "원격 제어 — " + name;
+      setRcMode(false);
+      document.getElementById("rc-status").textContent = "";
+      document.getElementById("remote-modal").classList.add("show");
+    }
+    async function closeRemoteModal() {
+      if (rcRemote) { stopMove(); await changeControlMode("auto"); }
+      if (rcIp) rcPost(`twist-close/${rcIp}`);  // 유휴 조종 WS 정리
+      document.getElementById("remote-modal").classList.remove("show");
+      rcIp = null;
+    }
+    document.getElementById("remote-close").onclick = closeRemoteModal;
+    document.getElementById("remote-modal").addEventListener("click", (e) => {
+      if (e.target.id === "remote-modal") closeRemoteModal();
+    });
+    document.getElementById("rc-auto").onclick = () => changeControlMode("auto");
+    document.getElementById("rc-remote").onclick = () => changeControlMode("remote");
+
+    // 자동/원격 공통 액션 버튼 (이벤트 위임)
+    document.getElementById("remote-modal").addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-rc]");
+      if (!b || !rcIp) return;
+      const act = b.dataset.rc;
+      if (act === "stop") {
+        await rcPost(`cancel-move/${rcIp}`); await rcPost(`stop-all/${rcIp}`); rcStatus("작업 정지");
+      } else if (act === "dock") { rcStatus(await rcPost(`dock/${rcIp}`) ? "충전소 복귀 명령 전송" : "실패"); }
+      else if (act === "standby") { rcStatus(await rcPost(`return-to-standby/${rcIp}`) ? "대기장소 복귀 시작" : "실패"); }
+      else if (act === "restart") { rcStatus(await rcPost(`relocalize/${rcIp}`) ? "시스템 재시작 중… (약 90초)" : "실패"); }
+      else if (act === "jack_up") { rcStatus(await rcPost(`jack/${rcIp}/jack_up`) ? "잭 업 명령 전송" : "실패"); }
+      else if (act === "jack_down") { rcStatus(await rcPost(`jack/${rcIp}/jack_down`) ? "잭 다운 명령 전송" : "실패"); }
+    });
+
+    // D-pad (누르는 동안 이동)
+    const MOVE = { fwd: [0.3, 0], back: [-0.2, 0], left: [0, 0.5], right: [0, -0.5] };
+    document.querySelectorAll(".dpad-btn[data-move]").forEach(btn => {
+      const [lv, av] = MOVE[btn.dataset.move];
+      const down = (e) => { e.preventDefault(); startMove(lv, av); };
+      btn.addEventListener("mousedown", down);
+      btn.addEventListener("touchstart", down, { passive: false });
+      btn.addEventListener("mouseup", stopMove);
+      btn.addEventListener("mouseleave", stopMove);
+      btn.addEventListener("touchend", stopMove);
+      btn.addEventListener("touchcancel", stopMove);
+    });
+    document.getElementById("dpad-stop").onclick = stopMove;
+
+    // 배차 작업 강제 정리 (로봇 이동 없이 세션만 종료)
+    document.getElementById("rc-clear").onclick = async () => {
+      if (!rcIp) return;
+      if (!confirm("이 로봇의 실행 중인 배차 작업을 삭제할까요?\n(로봇은 움직이지 않고 작업 기록만 정리됩니다)")) return;
+      rcStatus(await rcPost(`clear-dispatch/${rcIp}`) ? "배차 작업을 정리했습니다" : "정리 실패");
+    };
+
+    // ── 폴링 + 낙관적 반영 ─────────────────────────────
+    // 액션(호출/예약/출발/종료) 중에는 폴링이 낙관적 화면을 되돌리지 않도록 스킵한다.
+    let pendingActions = 0;
+
+    function patchPoi(poiId, changes) {
+      if (!data || !data.pois) return;
+      const p = data.pois.find(x => x.poi_id === poiId);
+      if (p) { Object.assign(p, changes); render(); }
+    }
+
+    async function refresh(force) {
+      if (!force && pendingActions > 0) return;
+      try {
+        data = await api("/api/dispatch/console/status");
+        render();
+      } catch (e) { console.error(e); }
+    }
+
+    refresh(true);
+    pollTimer = setInterval(() => refresh(false), 3000);  // LTE: 부하·데이터 절감 (낙관적 UI가 즉시 반영하므로 체감 지장 없음)
+  </script>
+</body>
+</html>

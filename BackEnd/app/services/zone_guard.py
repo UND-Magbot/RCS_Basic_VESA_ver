@@ -23,7 +23,7 @@ from app.services.geometry import (
 logger = logging.getLogger(__name__)
 
 ROBOT_PORT = 8090
-HTTP_TIMEOUT = 3
+HTTP_TIMEOUT = 10  # LTE 지연 대응 (pose 조회 실패 시 통로 보호가 약해지므로 넉넉히)
 WAIT_FOR_ZONE_TIMEOUT_SEC = 60.0  # zone 점유 해제 대기 한계
 WAIT_POLL_SEC = 1.0
 
@@ -62,23 +62,31 @@ def _active_map_id(db, robot_ip: str) -> int | None:
 
 def acquire_zones_for_move(robot_ip: str, robot_id: int | None,
                            target_x: float, target_y: float,
-                           is_stop_fn: Optional[callable] = None) -> list[int]:
+                           is_stop_fn: Optional[callable] = None) -> tuple[bool, list[int]]:
     """이동 경로가 지나갈 zone 들을 사전에 락. 다른 로봇 점유 시 대기.
-    반환: 획득한 zone id 목록. robot_id 가 None 이면 no-op.
-    is_stop_fn: 작업 중지 콜백 (True 반환 시 즉시 [] 반환).
+
+    반환: (proceed, zone_ids)
+      - proceed=True  : 이동해도 됨 (지나갈 zone 없음 → []  또는 모두 획득 → zone_ids)
+      - proceed=False : 이동하면 안 됨 (중지 요청 또는 점유 해제 대기 타임아웃)
+
+    robot_id 가 None 이면 no-op → (True, []).
+    is_stop_fn: 작업 중지 콜백 (True 반환 시 (False, []) 즉시 반환).
+
+    핵심: 점유를 못 잡았을 때 '강제 진행'하지 않는다. 못 잡으면 (False, [])를 돌려
+    호출자가 이동을 보류·재시도하게 해, 좁은 통로에서의 정면 교착을 방지한다.
     """
     if robot_id is None:
-        return []
+        return True, []
 
     from app.database import SessionLocal
     db = SessionLocal()
     try:
         map_id = _active_map_id(db, robot_ip)
         if map_id is None:
-            return []
+            return True, []
         zones = load_zone_polygons(db, map_id)
         if not zones:
-            return []
+            return True, []
     finally:
         db.close()
 
@@ -90,25 +98,26 @@ def acquire_zones_for_move(robot_ip: str, robot_id: int | None,
         crossed = zones_crossed_by_segment(zones, pose, (target_x, target_y))
 
     if not crossed:
-        return []
+        return True, []
 
     # 모두 잡을 때까지 대기 (한 zone 만 점유돼도 retry)
     deadline = time.time() + WAIT_FOR_ZONE_TIMEOUT_SEC
     logged_wait = False
     while True:
         if is_stop_fn and is_stop_fn():
-            return []
+            return False, []
         ok, conflict = zone_lock.try_acquire(crossed, robot_id)
         if ok:
             if logged_wait:
                 logger.info(f"[zone_guard] robot {robot_id} zone 진입 가능 → 락 획득 {crossed}")
-            return crossed
+            return True, crossed
         if not logged_wait:
             logger.info(f"[zone_guard] robot {robot_id} zone {conflict} 점유 대기 중...")
             logged_wait = True
         if time.time() > deadline:
-            logger.warning(f"[zone_guard] robot {robot_id} zone {conflict} 대기 타임아웃 — 강제 진행")
-            return []
+            # 강제 진행하지 않음 — 이동 보류 신호. 호출자가 재시도하며 통로가 빌 때까지 대기.
+            logger.warning(f"[zone_guard] robot {robot_id} zone {conflict} 대기 타임아웃 — 이동 보류")
+            return False, []
         time.sleep(WAIT_POLL_SEC)
 
 

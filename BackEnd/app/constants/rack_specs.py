@@ -34,6 +34,40 @@ RACK_SPECS: dict[str, dict] = {
         "foot_radius": 0.025,
         "cargo_to_jack_front_edge_min_distance": 0.05,
     },
+    # LG — longjack 로봇 전용 랙 (2026-07 실측: align_with_rack 성공 확인)
+    "LG": {
+        "width": 0.70, "depth": 0.50,
+        "margin": [0.05, 0.05, 0.05, 0.05],
+        "alignment": "center",
+        "alignment_margin_back": 0.02,
+        "extra_leg_offset": 0.0,
+        "leg_shape": "round",
+        "leg_size": 0.05,
+        "foot_radius": 0.02,
+        "cargo_to_jack_front_edge_min_distance": 0.05,
+    },
+    # LG2 — longjack 로봇용 2번째 LG 랙 (도면 기준: 다리 중심 665 × 600mm, 캐스터 GDS-100)
+    # (구 이름 LG_V2 → LG2 로 통일)
+    # 2026-08-06 실측: 구조 다리(프레임 기둥) 지름 25mm → leg_size 0.025 / foot_radius 0.0125.
+    #   기존 0.05(50mm)는 다리 대신 옆 캐스터 브래킷을 다리로 오인식하는 원인이었음.
+    # width/depth 는 도면 치수(665×600)가 아니라 라이다가 재는 "다리 중심 간격" 실측값을 넣어야 함.
+    #   체인 제거 후에도 뒷다리 검출이 캐스터 간섭으로 depth 0.52~0.57 로 흔들림(약 5cm).
+    #   펌웨어 크기매칭 허용오차 < 5cm 라 고정값 하나로 둘 다 못 맞음 → 관측 범위 중앙값 0.545 로 설정
+    #   (0.52·0.57 양쪽 오차 0.025 로 균등). width 0.64 는 안정적.
+    #   (초기 0.47/0.37 은 중앙에 늘어진 체인이 라이다에 잡혀 나온 가짜값이었음.)
+    # margin 0.05→0.08: 캐스터(바퀴)가 다리 라인 밖으로 튀어나와 장애물로 잡히는 문제 →
+    #   랙 풋프린트를 넓혀 캐스터를 랙 일부로 포함시킴 (leg_size 는 그대로).
+    "LG2": {
+        "width": 0.64, "depth": 0.545,
+        "margin": [0.08, 0.08, 0.08, 0.08],
+        "alignment": "center",
+        "alignment_margin_back": 0.02,
+        "extra_leg_offset": 0.0,
+        "leg_shape": "round",
+        "leg_size": 0.025,
+        "foot_radius": 0.0125,
+        "cargo_to_jack_front_edge_min_distance": 0.05,
+    },
 }
 
 # 등록 안 된 사이즈의 폴백 (S300 단일 spec 검증된 값)

@@ -64,11 +64,23 @@ async def lifespan(application: FastAPI):
         dispatch_service.recover_on_startup()
     except Exception as e:
         log.warning(f"[startup] dispatch recovery 실패: {e}")
+    # 로봇 부팅(재부팅) 후 자동 복구 — 온라인 감지 시 current-map 설정 + 충전소 기준 위치재조정
+    log.info("[startup] boot_recovery.start...")
+    try:
+        from app.services import boot_recovery
+        boot_recovery.start()
+    except Exception as e:
+        log.warning(f"[startup] boot_recovery 시작 실패: {e}")
     # 데드락 자동 감지/양보 기능 비활성화 — 사이트에 좁은 통로 없어 양보 불필요
     # 다시 켜려면 아래 두 줄 주석 해제
     # log.info("[startup] deadlock_monitor.start...")
     # deadlock_monitor.start()
     yield
+    try:
+        from app.services import boot_recovery
+        boot_recovery.stop()
+    except Exception:
+        pass
     # deadlock_monitor.stop()
     shutdown_scheduler()
 

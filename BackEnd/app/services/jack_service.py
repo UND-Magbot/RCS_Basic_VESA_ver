@@ -13,7 +13,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 ROBOT_PORT = 8090
-HTTP_TIMEOUT = 10
+HTTP_TIMEOUT = 15  # LTE 지연 대응 (명령/조회 유실 방지). WiFi 복귀 시 10으로 낮춰도 됨
 import json as _json
 
 
@@ -52,8 +52,8 @@ def get_docking_point_coords(ip: str, charger_name: str):
     except Exception as e:
         logger.warning(f"[{ip}] 도킹포인트 좌표 조회 실패: {e}")
         return None
-POLL_INTERVAL = 1.0
-MOVE_TIMEOUT = 120
+POLL_INTERVAL = 2.0    # LTE 데이터·부하 절감 (이동 상태 폴링 주기)
+MOVE_TIMEOUT = 180     # LTE 지연 감안해 이동 완료 대기 상향 (120 → 180초)
 
 # 실행 중인 작업 추적 (robot_ip → stop flag)
 _stop_flags: dict[str, bool] = {}
@@ -430,19 +430,30 @@ def robot_patch(ip: str, path: str, json_body: dict) -> dict:
     return r.json()
 
 
+class ZoneBlocked(Exception):
+    """이동 경로의 zone 이 다른 로봇에 점유되어 이동을 보류해야 함 (safe_move 재시도 대상)."""
+
+
 def create_move(ip: str, move_type: str, target_x: float, target_y: float,
                 target_ori: float = 0, retries: int = 5, **extra) -> int:
     # Zone 사전 락 — 이번 이동이 zone(좁은 통로 등)을 지나가면 다른 로봇 점유 해제까지 대기.
     rid = _running_robot_id_by_ip.get(ip)
     if rid is not None and move_type != "charge":
+        proceed = True
         try:
             from app.services.zone_guard import acquire_zones_for_move
-            acquire_zones_for_move(
+            proceed, _zones = acquire_zones_for_move(
                 ip, rid, target_x, target_y,
                 is_stop_fn=lambda: _stop_flags.get(ip, False),
             )
         except Exception as e:
             logger.warning(f"[zone_guard] acquire 실패(무시): {e}")
+            proceed = True  # zone 가드 자체 오류는 이동을 막지 않음(기존 동작 보존)
+        if not proceed:
+            # 점유 미해제(타임아웃) 또는 중지 요청 — 강제 진입하지 않는다.
+            if _stop_flags.get(ip, False):
+                raise RuntimeError("zone 대기 중 중지 요청")
+            raise ZoneBlocked(f"zone 점유 — 이동 보류 (robot {rid})")
     body = {
         "creator": "rcs",
         "type": move_type,
@@ -496,6 +507,14 @@ def safe_move(ip: str, move_type: str, target_x: float, target_y: float,
             move_id = create_move(ip, move_type, target_x, target_y, target_ori, **extra)
         except RuntimeError:
             raise
+        except ZoneBlocked as e:
+            # 통로 점유 — 강제 진입 대신 보류 후 재시도 (통로가 빌 때까지 대기)
+            logger.info(f"[safe_move] {ip} 통로 점유로 이동 보류 (시도 {attempt}): {e}")
+            update_job_status(ip, message=f"통로 혼잡 — 양보 대기 중 ({attempt}회차)")
+            if max_attempts is not None and attempt >= max_attempts:
+                return {"state": "failed", "fail_message": "zone 점유 지속 — 이동 보류 한도 초과"}
+            _interruptible_sleep(ip, retry_delay)
+            continue
         except Exception as e:
             logger.warning(f"[safe_move] {ip} create_move 실패 (시도 {attempt}): {e}")
             update_job_status(ip, message=f"통신 오류 — 재시도 중 ({attempt}회차)")

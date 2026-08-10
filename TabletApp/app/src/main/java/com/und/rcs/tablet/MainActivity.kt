@@ -3,6 +3,7 @@ package com.und.rcs.tablet
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.Bundle
 import android.webkit.JavascriptInterface
 import android.view.View
@@ -19,6 +20,9 @@ import androidx.appcompat.app.AppCompatActivity
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+
+    // 빌드 flavor 로 결정: "console"(관리자 콘솔) / "robot"(로봇 부착 태블릿)
+    private val isConsole: Boolean get() = BuildConfig.APP_MODE == "console"
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,24 +49,38 @@ class MainActivity : AppCompatActivity() {
 
         val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
         val serverUrl = prefs.getString("server_url", "") ?: ""
-        // VESA: 태블릿은 슬롯 번호(1, 2, 3 …)에 고정. 슬롯 ↔ POI 매핑은 서버 + 태블릿 페이지에서 관리
-        val slotNumber = prefs.getString("slot_number", "") ?: ""
 
-        if (serverUrl.isEmpty() || slotNumber.isEmpty()) {
-            showConfigDialog(prefs) { url, id -> loadTablet(url, id) }
+        if (isConsole) {
+            // 관리자 콘솔 — 서버 주소만 필요
+            if (serverUrl.isEmpty()) {
+                showConfigDialog(prefs) { url, id -> loadPage(url, id) }
+            } else {
+                loadPage(serverUrl, "")
+            }
         } else {
-            loadTablet(serverUrl, slotNumber)
+            // 로봇 부착 태블릿 — 서버 주소 + 로봇 ID
+            val robotId = prefs.getString("robot_id", "") ?: ""
+            if (serverUrl.isEmpty() || robotId.isEmpty()) {
+                showConfigDialog(prefs) { url, id -> loadPage(url, id) }
+            } else {
+                loadPage(serverUrl, robotId)
+            }
         }
     }
 
-    private fun loadTablet(serverUrl: String, slotNumber: String) {
+    private fun loadPage(serverUrl: String, robotId: String) {
         webView.webViewClient = WebViewClient()
-        // 슬롯 URL — 백엔드가 슬롯 매핑 조회. 매핑 없으면 페이지 내에서 설정 UI 노출
-        webView.loadUrl("${serverUrl.trimEnd('/')}/api/dispatch/tablet/$slotNumber")
+        val base = serverUrl.trimEnd('/')
+        val url = if (isConsole) {
+            "$base/api/dispatch/console"
+        } else {
+            "$base/api/dispatch/robot-tablet/$robotId"
+        }
+        webView.loadUrl(url)
     }
 
     private fun showConfigDialog(
-        prefs: android.content.SharedPreferences,
+        prefs: SharedPreferences,
         onConfirm: (String, String) -> Unit
     ) {
         val dp = resources.displayMetrics.density
@@ -84,30 +102,36 @@ class MainActivity : AppCompatActivity() {
             hint = "http://서버IP:8002"
             textSize = 18f
         }
-        val etId = EditText(this).apply {
-            setText(prefs.getString("slot_number", ""))
-            hint = "예: 1, 2, 3 …"
-            textSize = 22f
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-        }
-
         layout.addView(label("서버 주소"))
         layout.addView(etUrl)
-        layout.addView(label("슬롯 번호"))
-        layout.addView(etId)
+
+        // 로봇 태블릿 모드일 때만 로봇 ID 입력란 표시
+        val etId: EditText? = if (!isConsole) {
+            EditText(this).apply {
+                setText(prefs.getString("robot_id", ""))
+                hint = "예: 1, 2, 3 … (로봇 ID)"
+                textSize = 22f
+                inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            }.also {
+                layout.addView(label("로봇 ID"))
+                layout.addView(it)
+            }
+        } else null
+
+        val title = if (isConsole) "관리자 콘솔 설정" else "로봇 태블릿 설정"
 
         AlertDialog.Builder(this)
-            .setTitle("태블릿 설정 (슬롯 기반)")
+            .setTitle(title)
             .setView(layout)
             .setCancelable(false)
             .setPositiveButton("시작") { _, _ ->
                 val url = etUrl.text.toString().trim().trimEnd('/')
-                val id = etId.text.toString().trim()
-                if (url.isNotEmpty() && id.isNotEmpty()) {
-                    prefs.edit()
-                        .putString("server_url", url)
-                        .putString("slot_number", id)
-                        .apply()
+                val id = etId?.text?.toString()?.trim() ?: ""
+                val ok = url.isNotEmpty() && (isConsole || id.isNotEmpty())
+                if (ok) {
+                    val edit = prefs.edit().putString("server_url", url)
+                    if (!isConsole) edit.putString("robot_id", id)
+                    edit.apply()
                     onConfirm(url, id)
                 } else {
                     showConfigDialog(prefs, onConfirm)
@@ -134,7 +158,7 @@ class MainActivity : AppCompatActivity() {
         fun openSettings() {
             runOnUiThread {
                 val prefs = getSharedPreferences("config", Context.MODE_PRIVATE)
-                showConfigDialog(prefs) { url, id -> loadTablet(url, id) }
+                showConfigDialog(prefs) { url, id -> loadPage(url, id) }
             }
         }
 

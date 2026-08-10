@@ -8,8 +8,10 @@ from websocket import WebSocketException, create_connection
 
 
 PORT = 8090
-HTTP_TIMEOUT = 3
-WS_TIMEOUT = 4
+# LTE(M2M) 환경 대응: 왕복 지연이 크고(수백 ms~1s+) 간헐적 스파이크가 있어
+# 짧은 타임아웃이면 정상 로봇도 오프라인으로 오판된다. 넉넉히 상향.
+HTTP_TIMEOUT = 10
+WS_TIMEOUT = 12
 
 REST_ENDPOINTS = {
     "device_info": "/device/info",
@@ -18,9 +20,9 @@ REST_ENDPOINTS = {
 WS_TOPICS = ["/planning_state", "/detailed_battery_state", "/battery_state"]
 
 
-def _get(ip: str, secret: str, path: str) -> dict:
+def _get(ip: str, secret: str, path: str, timeout: float = HTTP_TIMEOUT) -> dict:
     url = f"http://{ip}:{PORT}{path}"
-    res = requests.get(url, headers={"Secret": secret}, timeout=HTTP_TIMEOUT)
+    res = requests.get(url, headers={"Secret": secret}, timeout=timeout)
     res.raise_for_status()
     return res.json()
 
@@ -119,11 +121,30 @@ def fetch_robot_live(ip: str, secret: str) -> dict:
     errors: dict = {}
     online = False
 
+    # 1) 온라인 판정은 '가벼운' 경로로 먼저 확정한다.
+    #    LTE(M2M) 환경에서 /device/info 는 응답이 커서 경로가 막히는(0 bytes) 사례가 있어,
+    #    그것에 의존하면 멀쩡한 로봇이 오프라인으로 잡혀 배차에서 빠진다.
+    #    /chassis/current-map 은 응답이 작아 LTE 에서도 안정적으로 온다.
+    try:
+        # 상태코드는 따지지 않는다 — 응답이 오기만 하면(맵 미설정 404 포함) 로봇은 살아있다.
+        # raise_for_status 를 하면 맵이 안 잡힌 로봇이 오프라인으로 오판된다.
+        requests.get(
+            f"http://{ip}:{PORT}/chassis/current-map",
+            headers={"Secret": secret},
+            timeout=HTTP_TIMEOUT,
+        )
+        online = True
+    except requests.RequestException as exc:
+        errors["online_probe"] = str(exc)
+
+    # 2) 상세 정보(device_info/wifi_info) — 성공하면 채우고, 실패해도 온라인 판정엔 영향 없음.
+    #    device_info 는 LTE 에서 막혀 오래 걸리므로 짧게만 시도한다(온라인은 위에서 이미 확정).
+    #    안 그러면 목록 조회가 device_info 타임아웃만큼 느려지고 불안정해진다.
     for key, path in REST_ENDPOINTS.items():
         try:
-            rest_data[key] = _get(ip, secret, path)
-            if key == "device_info":
-                online = True
+            to = 3.0 if key == "device_info" else HTTP_TIMEOUT
+            rest_data[key] = _get(ip, secret, path, timeout=to)
+            online = True
         except requests.RequestException as exc:
             errors[key] = str(exc)
 

@@ -111,11 +111,23 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
     }
   }, [robotIp]);
 
+  const clearDispatch = useCallback(async () => {
+    if (!window.confirm("이 로봇의 실행 중인 배차 작업을 삭제할까요?\n(로봇은 움직이지 않고 작업 기록만 정리됩니다)")) return;
+    try {
+      const res = await fetch(`${API}/api/robots/remote/clear-dispatch/${robotIp}`, { method: "POST" });
+      showStatus(res.ok ? "배차 작업을 정리했습니다" : "정리 실패");
+    } catch {
+      showStatus("연결 실패");
+    }
+  }, [robotIp]);
+
   useEffect(() => {
     return () => {
       if (intervalRef.current) clearInterval(intervalRef.current);
+      // 유지하던 조종용 WebSocket 연결 정리 (유휴 연결 누적 방지)
+      fetch(`${API}/api/robots/remote/twist-close/${robotIp}`, { method: "POST" }).catch(() => {});
     };
-  }, []);
+  }, [robotIp]);
 
   const handleClose = () => {
     if (isRemoteMode) {
@@ -270,6 +282,16 @@ export function RemoteControlModal({ robotName, robotIp, onClose }: RemoteContro
               </div>
             </>
           )}
+
+          {/* 배차 작업 강제 정리 (로봇 이동 없음) — 자동/원격 공통 */}
+          <div className="remote-modal__section">
+            <h4>배차 작업</h4>
+            <button
+              className="remote-modal__action-btn"
+              style={{ borderColor: "rgba(245,101,101,0.5)", color: "var(--color-error)", width: "100%" }}
+              onClick={clearDispatch}
+            >작업 강제 종료 (이동 없이 정리)</button>
+          </div>
         </div>
 
         {status && (
